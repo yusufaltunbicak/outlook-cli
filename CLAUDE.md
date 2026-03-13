@@ -1,0 +1,67 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What This Is
+
+A Python CLI tool for Outlook 365 that uses OWA bearer token authentication via Playwright browser interception — no Azure app registration, admin consent, or API keys required. Entry point: `outlook` command.
+
+## Build & Run
+
+```sh
+pip install -e .              # editable install (hatchling build system)
+playwright install chromium   # required for auth
+outlook login                 # first-time: opens browser, captures OWA bearer token
+outlook inbox                 # verify it works
+```
+
+No test suite exists yet — `tests/` directory is empty.
+
+## Architecture
+
+### Two API layers
+
+1. **Outlook REST v2** (`outlook.office.com/api/v2.0/me`) — standard mail, calendar, contacts, folders, per-message categories. Used by `OutlookClient` in `client.py`.
+2. **OWA service.svc** (`outlook.cloud.microsoft/owa/service.svc`) — reverse-engineered endpoint for master category list operations (create/delete/rename/recolor). Uses a non-standard pattern: JSON payload goes in the `x-owa-urlpostdata` header, body is empty. Used by `category_manager.py`.
+
+### Module responsibilities
+
+- **`cli.py`** — Click command group. All commands go here. Uses `_handle_api_error` decorator for auto re-login on 401.
+- **`client.py`** — `OutlookClient` wraps httpx for REST v2 API. Manages display-number-to-real-ID mapping (short `#1, #2` numbers → long Outlook IDs). Handles rate limiting (429 retry) and token expiry (401).
+- **`auth.py`** — Playwright-based token capture. Intercepts bearer tokens from OWA network requests. Picks the best token by testing against multiple endpoints. Caches token + browser SSO state.
+- **`category_manager.py`** — Standalone module for OWA master category operations. Has its own `_owa_request` helper (separate from `client.py`'s `_owa_action`). `rename_category` and `clear_category` do bulk message propagation via REST v2.
+- **`signature_manager.py`** — Signature management: pull from SentItems, save as HTML files in `~/.config/outlook-cli/signatures/`, append to outgoing emails. Handles plain text → HTML conversion when signature is used.
+- **`models.py`** — Dataclasses (`Email`, `Folder`, `Attachment`, `Event`, `Attendee`, `Contact`, `EmailAddress`) with `from_api()` class methods that parse Outlook REST v2 JSON. `Email` includes `categories: list[str]`. `Event` includes `attendees: list[Attendee]`, `recurrence`, `event_type` (SingleInstance/Occurrence/Exception/SeriesMaster), `series_master_id`, `display_num`.
+- **`formatter.py`** — Rich table output. `Console(stderr=True)` so JSON piping stays clean on stdout.
+- **`serialization.py`** — JSON export using `dataclasses.asdict()`.
+- **`config.py`** — YAML config loader with deep-merge defaults.
+- **`constants.py`** — URLs, cache/config paths.
+
+### Key patterns
+
+- **Display number ID mapping**: Messages and events get short `#1, #2...` numbers stored in `~/.cache/outlook-cli/id_map.json`. Users reference items by these numbers. The map is capped at 500 entries with LRU eviction. Events share the same ID map as messages.
+- **Multi-ID commands**: `delete`, `move`, `mark-read`, `categorize`, `uncategorize` accept multiple message IDs via Click's `nargs=-1`. The variadic argument comes first, fixed argument (destination/category) last.
+- **Send confirmation**: `send`, `reply`, `forward`, `draft-send`, `schedule`, `schedule-draft`, `event-create` show details and require confirmation before action. All accept `-y` to skip. Draft-creation commands (`draft`, `reply-draft`) do NOT require confirmation since nothing is sent. `event-delete` also confirms unless `-y`.
+- **Draft reply**: `reply-draft` uses `createReply` / `createReplyAll` REST v2 endpoints to create reply drafts with original recipients pre-filled. Body argument is optional (default empty).
+- **Scheduled send**: Uses `PidTagDeferredSendTime` (0x3FEF) extended property. `schedule` uses `/sendmail` with the property inline. `schedule-draft` PATCHes an existing draft then sends it. Tracked locally in `scheduled.json` (REST v2 doesn't support `$filter`/`$expand` on extended properties). `schedule-list` cross-references local tracking with Drafts folder by subject to find matching draft IDs. `schedule-cancel` deletes both local tracking and the server draft when found. Time formats: `+30m`, `+1h`, `tomorrow 09:00`, `2024-03-15T10:00`.
+- **`$filter` vs `$search` split**: REST v2 can't combine `$filter` and `$search`. Text filters (from/subject/hasattachments) use KQL `$search` (no `$orderby`). Date/read/category filters use `$filter` (supports `$orderby`). See `_build_query_params` in `client.py`.
+- **`--no-category` client-side filtering**: REST v2 can't filter for empty `Categories` array. `get_messages` over-fetches in pages (3x batch, max 5 pages) and filters locally to guarantee `--max` count.
+- **Signature extraction**: `signature_manager.py` parses SentItems HTML to find the outermost `<table>` containing `mailto:` links. Signatures are stored as plain HTML files — no API dependency.
+- **Token flow**: env var `OUTLOOK_TOKEN` → cached `token.json` → interactive Playwright login. Auto re-login on 401 via `_handle_api_error` decorator in `cli.py`.
+- **Dual OWA helpers**: `client.py` has `_owa_action` and `category_manager.py` has `_owa_request` — both call OWA service.svc with slightly different base URLs (`outlook.office365.com` vs `outlook.cloud.microsoft`).
+- **Calendar CRUD**: Full event lifecycle via REST v2: `POST /events` (create), `GET /events/{id}` (read), `PATCH /events/{id}` (update), `DELETE /events/{id}` (delete). Attendee management via `add_event_attendees`/`remove_event_attendees` (GET existing + PATCH merged list). Meeting responses via `POST /events/{id}/{accept|decline|tentativelyaccept}`.
+- **Shared calendars**: `--calendar "Name"` resolves display name → ID via `_resolve_calendar` (exact match first, then partial). Queries `/me/calendars/{id}/calendarview` instead of `/me/calendarview`.
+- **Recurrence**: `event-create --repeat daily|weekly|monthly` builds `Recurrence` payload with Pattern (Type, Interval, DaysOfWeek, DayOfMonth) + Range (Numbered/EndDate). `event-instances` lists occurrences via `/events/{master_id}/instances` — auto-resolves occurrence → series master via `SeriesMasterId`. `event-delete --series` deletes via series master ID.
+- **Free/busy**: `findMeetingTimes` endpoint with attendees, time constraints, duration. Returns MeetingTimeSuggestions with confidence scores.
+- **People search**: `/me/people?$search=query` for attendee autocomplete. Returns `ScoredEmailAddresses`.
+
+### Cache & config locations
+
+- Cache: `~/.cache/outlook-cli/` (token.json, browser-state.json, id_map.json, scheduled.json)
+- Config: `~/.config/outlook-cli/config.yaml`
+- Signatures: `~/.config/outlook-cli/signatures/*.html`
+- Overridable via `OUTLOOK_CLI_CACHE` and `OUTLOOK_CLI_CONFIG` env vars
+
+### Dependencies
+
+click, rich, httpx, playwright, PyYAML, beautifulsoup4. Python >=3.10. Build: hatchling.

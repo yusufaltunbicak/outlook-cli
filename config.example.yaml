@@ -1,0 +1,23 @@
+# outlook-cli configuration
+# Copy to ~/.config/outlook-cli/config.yaml
+
+# Default number of messages to fetch
+max_messages: 25
+
+# Default folder to show
+default_folder: Inbox
+
+# Default signature to append to outgoing emails (set to signature name or null)
+default_signature: null
+
+# Timezone for calendar operations (Microsoft Windows timezone ID)
+# See: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/default-time-zones
+timezone: UTC
+
+# Browser settings for login
+browser:
+  headless: false
+  timeout: 120  # seconds to wait for login
+
+# Output format (table or json)
+output_format: table
