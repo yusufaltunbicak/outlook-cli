@@ -1,0 +1,48 @@
+{
+  "$schema": "https://wvw.dev/apps.schema.json",
+  "store": {
+    "name": "Yusuf's Apps",
+    "developer": "Yusuf Altunbicak",
+    "tagline": "CLI tools for everyday workflows.",
+    "github": "https://github.com/yusufaltunbicak"
+  },
+  "categories": [
+    { "id": "cli", "name": "CLI Apps" },
+    { "id": "productivity", "name": "Productivity" }
+  ],
+  "featured": [],
+  "apps": [
+    {
+      "id": "outlook365-cli",
+      "name": "Outlook CLI",
+      "subtitle": "Outlook 365 from your terminal",
+      "description": "Read, send, search, and manage Outlook 365 emails, calendar, and contacts from the terminal. No API keys or admin consent required.",
+      "longDescription": "A full-featured CLI for Outlook 365 with 30+ commands — inbox, send, reply, forward, drafts, scheduled send, calendar CRUD, categories, signatures, attachments, and contacts. Uses browser-based token capture via Playwright so there's no Azure app registration, admin consent, or API keys to configure. Auto-JSON output when piped, structured envelope format, and short display numbers for quick message referencing.",
+      "icon": null,
+      "iconEmoji": "\ud83d\udcec",
+      "category": ["cli", "productivity"],
+      "platform": "Python",
+      "price": "Free",
+      "github": "https://github.com/yusufaltunbicak/outlook-cli",
+      "homepage": null,
+      "language": "Python",
+      "installCommand": "pip install outlook365-cli",
+      "requirements": "Python 3.10+",
+      "features": [
+        "Inbox with filters — sender, subject, date, attachments, categories",
+        "Send, reply, forward with confirmation prompts",
+        "Drafts and scheduled send with flexible time formats",
+        "Full calendar CRUD — create, update, delete, recurring events",
+        "Meeting responses — accept, decline, tentative",
+        "Free/busy lookup and people search",
+        "Category management with bulk operations",
+        "Signature extraction from sent emails",
+        "Auto-JSON output when piped — no flag needed",
+        "Browser-based auth — no API keys or admin consent"
+      ],
+      "screenshots": [
+        "https://raw.githubusercontent.com/yusufaltunbicak/outlook-cli/main/docs/screenshot.jpeg"
+      ]
+    }
+  ]
+}
