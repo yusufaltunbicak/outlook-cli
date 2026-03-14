@@ -387,6 +387,8 @@ class OutlookClient:
         Unpin deletes the RenewTime field.
         """
         real_id = self._resolve_id(message_id)
+        # REST v2 uses URL-safe base64 (- and _), OWA expects standard base64 (/ and +)
+        real_id = real_id.replace("-", "/").replace("_", "+")
 
         if pinned:
             updates = [{

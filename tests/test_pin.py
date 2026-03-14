@@ -53,7 +53,9 @@ class TestPinMessage:
 
         payload = mock_owa.call_args[0][1]
         item_id = payload["Body"]["ItemChanges"][0]["ItemId"]["Id"]
-        assert item_id == FAKE_MSG_ID
+        # ID should be converted from URL-safe to standard base64
+        expected = FAKE_MSG_ID.replace("-", "/").replace("_", "+")
+        assert item_id == expected
 
     def test_pin_uses_correct_owa_headers(self, client):
         with patch.object(client, "_owa_action", return_value={}) as mock_owa, \
