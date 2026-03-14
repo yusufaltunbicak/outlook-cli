@@ -9,7 +9,7 @@ import click
 from ..auth import get_token, login as do_login, verify_token
 from ..client import OutlookClient
 from ..config import load_config
-from ..exceptions import AuthRequiredError, OutlookCliError, ResourceNotFoundError, TokenExpiredError
+from ..exceptions import AuthRequiredError, OutlookCliError, ResourceNotFoundError, TokenExpiredError, error_code_for_exception
 from ..formatter import (
     console,
     print_attachments,
@@ -28,7 +28,7 @@ from ..formatter import (
     print_success,
     print_whoami,
 )
-from ..serialization import save_json, to_json
+from ..serialization import error_json, save_json, to_json, to_json_envelope
 
 cfg = load_config()
 
@@ -47,6 +47,12 @@ def _get_client() -> OutlookClient:
     return _client_cache["c"]
 
 
+def _is_json_mode() -> bool:
+    """Check if current command was invoked with --json flag."""
+    ctx = click.get_current_context(silent=True)
+    return bool(ctx and ctx.params.get("as_json"))
+
+
 def _handle_api_error(fn):
     """Decorator to catch common API errors. Auto re-login on 401."""
     import functools
@@ -56,23 +62,32 @@ def _handle_api_error(fn):
         try:
             return fn(*args, **kwargs)
         except TokenExpiredError:
-            print_error("Token expired. Attempting re-login...")
+            if _is_json_mode():
+                click.echo(error_json("session_expired", "Token expired. Attempting re-login..."))
+            else:
+                print_error("Token expired. Attempting re-login...")
             try:
                 token = do_login()
                 print_success("Re-login successful. Retrying...")
                 _client_cache.clear()
                 return fn(*args, **kwargs)
             except Exception:
-                print_error("Auto re-login failed. Run: outlook login --force")
+                if _is_json_mode():
+                    click.echo(error_json("auth_failed", "Auto re-login failed. Run: outlook login --force"))
+                else:
+                    print_error("Auto re-login failed. Run: outlook login --force")
                 sys.exit(1)
-        except ResourceNotFoundError as e:
-            print_error(str(e))
-            sys.exit(1)
         except OutlookCliError as e:
-            print_error(str(e))
+            if _is_json_mode():
+                click.echo(error_json(error_code_for_exception(e), str(e)))
+            else:
+                print_error(str(e))
             sys.exit(1)
         except Exception as e:
-            print_error(f"Error: {e}")
+            if _is_json_mode():
+                click.echo(error_json("unknown_error", str(e)))
+            else:
+                print_error(f"Error: {e}")
             sys.exit(1)
 
     return wrapper

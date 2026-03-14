@@ -11,7 +11,7 @@ from ._common import (
     print_error,
     print_success,
     print_whoami,
-    to_json,
+    to_json_envelope,
     verify_token,
 )
 
@@ -41,6 +41,6 @@ def whoami(as_json: bool):
     client = _get_client()
     data = client.get_me()
     if as_json:
-        click.echo(to_json(data))
+        click.echo(to_json_envelope(data))
     else:
         print_whoami(data)

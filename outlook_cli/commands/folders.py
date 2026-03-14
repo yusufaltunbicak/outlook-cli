@@ -13,7 +13,7 @@ from ._common import (
     print_inbox,
     print_success,
     save_json,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -31,7 +31,7 @@ def folders(as_json: bool, output: str | None):
             save_json(folder_list, output)
             print_success(f"Saved to {output}")
         else:
-            click.echo(to_json(folder_list))
+            click.echo(to_json_envelope(folder_list))
     else:
         print_folders(folder_list)
 
@@ -79,7 +79,7 @@ def folder(
     )
 
     if as_json:
-        click.echo(to_json(messages))
+        click.echo(to_json_envelope(messages))
     else:
         if not messages:
             print_success(f"No messages found in '{name}'.")

@@ -11,7 +11,7 @@ from ._common import (
     get_token,
     print_categories,
     print_success,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -25,7 +25,7 @@ def categories(as_json: bool):
     cat_list = resp.get("Body", {}).get("CategoryDetailsList", [])
 
     if as_json:
-        click.echo(to_json(cat_list))
+        click.echo(to_json_envelope(cat_list))
     else:
         if not cat_list:
             print_success("No categories defined.")

@@ -10,7 +10,7 @@ from ._common import (
     print_contacts,
     print_success,
     save_json,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -29,7 +29,7 @@ def contacts(max_count: int, as_json: bool, output: str | None):
             save_json(contact_list, output)
             print_success(f"Saved to {output}")
         else:
-            click.echo(to_json(contact_list))
+            click.echo(to_json_envelope(contact_list))
     else:
         if not contact_list:
             print_success("No contacts found.")

@@ -12,7 +12,7 @@ from ._common import (
     _handle_api_error,
     print_attachments,
     print_success,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -32,7 +32,7 @@ def attachments(message_id: str, download: bool, save_to: str, as_json: bool):
         return
 
     if as_json:
-        click.echo(to_json(atts))
+        click.echo(to_json_envelope(atts))
         return
 
     print_attachments(atts)

@@ -14,7 +14,7 @@ from ._common import (
     console,
     print_error,
     print_success,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -139,7 +139,7 @@ def schedule(to: str, subject: str, body: str, at: str, cc: tuple, is_html: bool
     )
 
     if as_json:
-        click.echo(to_json({"status": "scheduled", "to": to_list, "subject": subject, "scheduled_at": send_at.isoformat()}))
+        click.echo(to_json_envelope({"status": "scheduled", "to": to_list, "subject": subject, "scheduled_at": send_at.isoformat()}))
     else:
         local_send = send_at.astimezone(datetime.now().astimezone().tzinfo)
         print_success(f"Email scheduled to {to} at {local_send.strftime('%Y-%m-%d %H:%M')}")
@@ -154,7 +154,7 @@ def schedule_list(as_json: bool):
     entries = client.get_scheduled_list()
 
     if as_json:
-        click.echo(to_json(entries))
+        click.echo(to_json_envelope(entries))
     else:
         if not entries:
             print_success("No scheduled emails.")

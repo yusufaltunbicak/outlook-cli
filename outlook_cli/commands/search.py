@@ -10,7 +10,7 @@ from ._common import (
     print_error,
     print_inbox,
     save_json,
-    to_json,
+    to_json_envelope,
     print_success,
 )
 
@@ -31,7 +31,7 @@ def search(query: str, max_count: int, as_json: bool, output: str | None):
             save_json(messages, output)
             print_success(f"Saved to {output}")
         else:
-            click.echo(to_json(messages))
+            click.echo(to_json_envelope(messages))
     else:
         if not messages:
             print_error("No results found.")

@@ -19,7 +19,7 @@ from ._common import (
     print_people,
     print_success,
     save_json,
-    to_json,
+    to_json_envelope,
 )
 
 
@@ -127,7 +127,7 @@ def calendar(days: int, cal_name: str | None, as_json: bool, output: str | None)
             save_json(events, output)
             print_success(f"Saved to {output}")
         else:
-            click.echo(to_json(events))
+            click.echo(to_json_envelope(events))
     else:
         if not events:
             print_success(f"No events in the next {days} days.")
@@ -145,7 +145,7 @@ def event(event_id: str, as_json: bool):
     client = _get_client()
     ev = client.get_event(event_id)
     if as_json:
-        click.echo(to_json(ev))
+        click.echo(to_json_envelope(ev))
     else:
         print_event_detail(ev)
 
@@ -227,7 +227,7 @@ def event_create(
     )
 
     if as_json:
-        click.echo(to_json(ev))
+        click.echo(to_json_envelope(ev))
     else:
         print_success(f"Event created: {ev.subject}")
         console.print(f"  [dim]{ev.start.strftime('%Y-%m-%d %H:%M')} - {ev.end.strftime('%H:%M')}[/dim]")
@@ -280,7 +280,7 @@ def event_update(
         kwargs["timezone"] = cfg.get("timezone", "UTC")
         ev = client.update_event(event_id, **kwargs)
         if as_json:
-            click.echo(to_json(ev))
+            click.echo(to_json_envelope(ev))
         else:
             print_success(f"Event #{event_id} updated: {ev.subject}")
     elif not add_attendee and not remove_attendee:
@@ -338,7 +338,7 @@ def event_instances(event_id: str, days: int, as_json: bool):
         end=end.isoformat(),
     )
     if as_json:
-        click.echo(to_json(events))
+        click.echo(to_json_envelope(events))
     else:
         if not events:
             print_success("No occurrences found.")
@@ -376,7 +376,7 @@ def calendars_cmd(as_json: bool):
     client = _get_client()
     cals = client.get_calendars()
     if as_json:
-        click.echo(to_json(cals))
+        click.echo(to_json_envelope(cals))
     else:
         if not cals:
             print_success("No calendars found.")
@@ -417,7 +417,7 @@ def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duratio
     )
 
     if as_json:
-        click.echo(to_json(suggestions))
+        click.echo(to_json_envelope(suggestions))
     else:
         if not suggestions:
             print_error("No available meeting slots found.")
@@ -436,7 +436,7 @@ def people_search(query: str, max_count: int, as_json: bool):
     client = _get_client()
     results = client.search_people(query, top=max_count)
     if as_json:
-        click.echo(to_json(results))
+        click.echo(to_json_envelope(results))
     else:
         if not results:
             print_error("No people found.")
