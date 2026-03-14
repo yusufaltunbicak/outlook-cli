@@ -41,5 +41,14 @@ Issues = "https://github.com/yusufaltunbicak/outlook-cli/issues"
 [project.scripts]
 outlook = "outlook_cli.cli:cli"
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "smoke: marks tests as smoke tests (require live Outlook token)",
+]
+
 [tool.hatch.build.targets.wheel]
 packages = ["outlook_cli"]

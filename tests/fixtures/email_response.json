@@ -1,0 +1,49 @@
+{
+  "Id": "AAMkAGQ3ZWI2YjRlLTQ0MDctNDFmYi05OWM2LWY5YjUyNTgyODEwNQBG",
+  "Subject": "Q4 Budget Review",
+  "From": {
+    "EmailAddress": {
+      "Name": "Alice Smith",
+      "Address": "alice.smith@contoso.com"
+    }
+  },
+  "ToRecipients": [
+    {
+      "EmailAddress": {
+        "Name": "Bob Jones",
+        "Address": "bob.jones@contoso.com"
+      }
+    },
+    {
+      "EmailAddress": {
+        "Name": "Carol Lee",
+        "Address": "carol.lee@contoso.com"
+      }
+    }
+  ],
+  "CcRecipients": [
+    {
+      "EmailAddress": {
+        "Name": "Dave Kim",
+        "Address": "dave.kim@contoso.com"
+      }
+    }
+  ],
+  "ReceivedDateTime": "2026-03-10T14:30:00Z",
+  "BodyPreview": "Please review the attached budget proposal for Q4.",
+  "Body": {
+    "ContentType": "HTML",
+    "Content": "<html><body>Please review the attached budget proposal for Q4.</body></html>"
+  },
+  "IsRead": false,
+  "HasAttachments": true,
+  "Importance": "High",
+  "ConversationId": "AAQkAGQ3ZWI2YjRl",
+  "Categories": ["Finance", "Urgent"],
+  "SingleValueExtendedProperties": [
+    {
+      "PropertyId": "SystemTime 0x3FEF",
+      "Value": "2026-03-15T10:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "Id": "AAMkAGQ3ZWI2YjRlLTQ0MDctNDFmYi05OWM2LWY5YjUyNTgyODEwNQBG_EVT",
+  "Subject": "Weekly Standup",
+  "Start": {
+    "DateTime": "2026-03-16T09:00:00.0000000",
+    "TimeZone": "UTC"
+  },
+  "End": {
+    "DateTime": "2026-03-16T09:30:00.0000000",
+    "TimeZone": "UTC"
+  },
+  "Location": {
+    "DisplayName": "Room A"
+  },
+  "Organizer": {
+    "EmailAddress": {
+      "Name": "Alice Smith",
+      "Address": "alice.smith@contoso.com"
+    }
+  },
+  "IsAllDay": false,
+  "BodyPreview": "Weekly sync with the team.",
+  "Body": {
+    "ContentType": "Text",
+    "Content": "Weekly sync with the team."
+  },
+  "Attendees": [
+    {
+      "EmailAddress": {
+        "Name": "Bob Jones",
+        "Address": "bob.jones@contoso.com"
+      },
+      "Type": "Required",
+      "Status": {
+        "Response": "Accepted"
+      }
+    },
+    {
+      "EmailAddress": {
+        "Name": "Carol Lee",
+        "Address": "carol.lee@contoso.com"
+      },
+      "Type": "Optional",
+      "Status": {
+        "Response": "NotResponded"
+      }
+    }
+  ],
+  "Categories": [],
+  "ShowAs": "Busy",
+  "Sensitivity": "Normal",
+  "IsCancelled": false,
+  "ResponseStatus": {
+    "Response": "Organizer"
+  },
+  "WebLink": "https://outlook.office365.com/owa/?itemid=abc",
+  "IsOnlineMeeting": true,
+  "OnlineMeeting": {
+    "JoinUrl": "https://teams.microsoft.com/l/meetup-join/abc123"
+  },
+  "Recurrence": {
+    "Pattern": {
+      "Type": "Weekly",
+      "Interval": 1,
+      "DaysOfWeek": ["Monday"]
+    },
+    "Range": {
+      "Type": "Numbered",
+      "StartDate": "2026-03-16",
+      "NumberOfOccurrences": 8
+    }
+  },
+  "Type": "SeriesMaster",
+  "SeriesMasterId": ""
+}
