@@ -15,7 +15,10 @@ outlook login                 # first-time: opens browser, captures OWA bearer t
 outlook inbox                 # verify it works
 ```
 
-No test suite exists yet — `tests/` directory is empty.
+```sh
+pytest               # run all 45 unit tests
+pytest -m smoke      # run only smoke tests (require live token)
+```
 
 ## Architecture
 
@@ -26,14 +29,28 @@ No test suite exists yet — `tests/` directory is empty.
 
 ### Module responsibilities
 
-- **`cli.py`** — Click command group. All commands go here. Uses `_handle_api_error` decorator for auto re-login on 401.
-- **`client.py`** — `OutlookClient` wraps httpx for REST v2 API. Manages display-number-to-real-ID mapping (short `#1, #2` numbers → long Outlook IDs). Handles rate limiting (429 retry) and token expiry (401).
+- **`cli.py`** — Click group definition + command registration hub only (~92 lines). Imports from `commands/` modules.
+- **`commands/`** — All CLI commands split into modules:
+  - `_common.py` — shared helpers: `_get_client`, `_handle_api_error`, `_wants_json`, `cfg`
+  - `auth.py` — `login`, `whoami`
+  - `mail.py` — `inbox`, `read`, `thread`, `send`, `draft`, `draft-send`, `reply`, `reply-draft`, `forward`
+  - `schedule.py` — `schedule`, `schedule-list`, `schedule-cancel`, `schedule-draft`
+  - `search.py` — `search`
+  - `folders.py` — `folders`, `folder`
+  - `categories.py` — `categories`, `categorize`, `uncategorize`, `category-create/rename/clear/delete`
+  - `signatures.py` — `signature-pull`, `signature-list`, `signature-show`, `signature-delete`
+  - `manage.py` — `mark-read`, `move`, `delete`
+  - `attachments.py` — `attachments`
+  - `calendar.py` — `calendar`, `event`, `event-create/update/delete/instances/respond`, `calendars`, `free-busy`, `people-search`
+  - `contacts.py` — `contacts`
+- **`exceptions.py`** — Structured exception hierarchy: `OutlookCliError` → `TokenExpiredError`, `RateLimitError`, `ResourceNotFoundError`, `AuthRequiredError`. Includes `error_code_for_exception()` mapping.
+- **`client.py`** — `OutlookClient` wraps httpx for REST v2 API. Manages display-number-to-real-ID mapping (short `#1, #2` numbers → long Outlook IDs). Handles rate limiting (429 retry) and token expiry (401). `get_thread()` fetches conversation chains.
 - **`auth.py`** — Playwright-based token capture. Intercepts bearer tokens from OWA network requests. Picks the best token by testing against multiple endpoints. Caches token + browser SSO state.
 - **`category_manager.py`** — Standalone module for OWA master category operations. Has its own `_owa_request` helper (separate from `client.py`'s `_owa_action`). `rename_category` and `clear_category` do bulk message propagation via REST v2.
 - **`signature_manager.py`** — Signature management: pull from SentItems, save as HTML files in `~/.config/outlook-cli/signatures/`, append to outgoing emails. Handles plain text → HTML conversion when signature is used.
 - **`models.py`** — Dataclasses (`Email`, `Folder`, `Attachment`, `Event`, `Attendee`, `Contact`, `EmailAddress`) with `from_api()` class methods that parse Outlook REST v2 JSON. `Email` includes `categories: list[str]`. `Event` includes `attendees: list[Attendee]`, `recurrence`, `event_type` (SingleInstance/Occurrence/Exception/SeriesMaster), `series_master_id`, `display_num`.
-- **`formatter.py`** — Rich table output. `Console(stderr=True)` so JSON piping stays clean on stdout.
-- **`serialization.py`** — JSON export using `dataclasses.asdict()`.
+- **`formatter.py`** — Rich table output. `Console(stderr=True)` so JSON piping stays clean on stdout. `print_thread()` for conversation view.
+- **`serialization.py`** — `to_json_envelope()` wraps data in `{ok, schema_version, data}` for stdout. `error_json()` for structured errors. `to_json()` / `save_json()` for raw file export.
 - **`config.py`** — YAML config loader with deep-merge defaults.
 - **`constants.py`** — URLs, cache/config paths.
 
@@ -47,7 +64,10 @@ No test suite exists yet — `tests/` directory is empty.
 - **`$filter` vs `$search` split**: REST v2 can't combine `$filter` and `$search`. Text filters (from/subject/hasattachments) use KQL `$search` (no `$orderby`). Date/read/category filters use `$filter` (supports `$orderby`). See `_build_query_params` in `client.py`.
 - **`--no-category` client-side filtering**: REST v2 can't filter for empty `Categories` array. `get_messages` over-fetches in pages (3x batch, max 5 pages) and filters locally to guarantee `--max` count.
 - **Signature extraction**: `signature_manager.py` parses SentItems HTML to find the outermost `<table>` containing `mailto:` links. Signatures are stored as plain HTML files — no API dependency.
-- **Token flow**: env var `OUTLOOK_TOKEN` → cached `token.json` → interactive Playwright login. Auto re-login on 401 via `_handle_api_error` decorator in `cli.py`.
+- **Conversation thread**: `thread` command fetches all messages with the same `ConversationId`. REST v2 doesn't support `$filter` on `ConversationId`, so `get_thread()` searches by base subject (strips Re:/Fwd:/İlt:/Ynt: prefixes) then filters client-side by `ConversationId`. Results sorted oldest-first.
+- **Structured JSON envelope**: All `--json` output wraps data in `{ok: true, schema_version: "1", data: [...]}`. Errors return `{ok: false, error: {code, message}}`. Error codes: `session_expired`, `rate_limited`, `not_found`, `not_authenticated`, `unknown_error`. File export (`-o` flag) stays raw (no envelope).
+- **Auto-JSON on pipe**: When stdout is not a TTY (piped to `jq`, `grep`, etc.), commands automatically output JSON envelope — no `--json` flag needed. Controlled by `_is_piped()` / `_wants_json()` in `commands/_common.py`.
+- **Token flow**: env var `OUTLOOK_TOKEN` → cached `token.json` → interactive Playwright login. Auto re-login on 401 via `_handle_api_error` decorator in `commands/_common.py`.
 - **Dual OWA helpers**: `client.py` has `_owa_action` and `category_manager.py` has `_owa_request` — both call OWA service.svc with slightly different base URLs (`outlook.office365.com` vs `outlook.cloud.microsoft`).
 - **Calendar CRUD**: Full event lifecycle via REST v2: `POST /events` (create), `GET /events/{id}` (read), `PATCH /events/{id}` (update), `DELETE /events/{id}` (delete). Attendee management via `add_event_attendees`/`remove_event_attendees` (GET existing + PATCH merged list). Meeting responses via `POST /events/{id}/{accept|decline|tentativelyaccept}`.
 - **Shared calendars**: `--calendar "Name"` resolves display name → ID via `_resolve_calendar` (exact match first, then partial). Queries `/me/calendars/{id}/calendarview` instead of `/me/calendarview`.

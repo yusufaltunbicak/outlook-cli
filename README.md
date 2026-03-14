@@ -46,11 +46,12 @@ outlook inbox --no-category            # only uncategorized messages
 outlook inbox -n 50 --no-category      # find 50 uncategorized messages
 ```
 
-### Read / Search
+### Read / Search / Thread
 
 ```sh
 outlook read 3                 # read message #3
 outlook read 3 --raw           # raw HTML body
+outlook thread 3               # full conversation thread for message #3
 outlook search "keyword"       # search messages
 outlook search "from:john" --max 10
 ```
@@ -233,17 +234,18 @@ outlook contacts
 
 ## JSON Output
 
+**Auto-JSON on pipe:** When stdout is piped, JSON output is automatic — no `--json` flag needed.
+
 ```sh
-outlook inbox --json                   # JSON to stdout
-outlook inbox --json -o emails.json    # save to file
-outlook search "report" --json -o results.json
-outlook categories --json
+outlook inbox | jq '.data[0].subject'        # auto-JSON when piped
+outlook inbox --json                          # explicit JSON in terminal
+outlook inbox --json -o emails.json           # save to file
 ```
 
-Rich table output goes to stderr, so JSON piping is clean:
+All JSON output uses a structured envelope:
 
-```sh
-outlook inbox --json | jq '.[0].subject'
+```json
+{"ok": true, "schema_version": "1", "data": [...]}
 ```
 
 ## How It Works

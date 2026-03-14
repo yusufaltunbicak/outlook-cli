@@ -67,6 +67,13 @@ outlook read 3 --raw       # Show raw HTML body
 outlook read 3 --json      # JSON output
 ```
 
+### Conversation Thread
+
+```bash
+outlook thread 3           # Show full conversation for message #3
+outlook thread 3 --json    # JSON output
+```
+
 ### Send / Reply / Forward
 
 ```bash
@@ -291,16 +298,29 @@ outlook contacts --json -o contacts.json
 
 ## JSON / Scripting
 
-Rich output goes to stderr, stdout is pure JSON for clean piping:
+**Auto-JSON on pipe:** When stdout is piped (not a terminal), all commands automatically output JSON — no `--json` flag needed.
 
 ```bash
-outlook inbox --json | jq '.[0].subject'
-outlook inbox --json > inbox.json
-outlook search "keyword" --json | jq 'length'
-outlook folders --json | jq '.[] | select(.name == "Inbox") | .unread_count'
-outlook inbox --from "acme" --json -o acme_emails.json
-outlook categories --json | jq '.[].Category'
+outlook inbox | jq '.data[0].subject'           # auto-JSON when piped
+outlook inbox --json                              # explicit JSON in terminal
+outlook inbox --json -o emails.json               # save raw JSON to file
+outlook search "keyword" | jq '.data | length'
+outlook categories | jq '.data[].Category'
 ```
+
+**Structured envelope:** All JSON output is wrapped in a standard envelope:
+
+```json
+{"ok": true, "schema_version": "1", "data": [...]}
+```
+
+Errors also return structured JSON (when in JSON mode):
+
+```json
+{"ok": false, "schema_version": "1", "error": {"code": "not_found", "message": "..."}}
+```
+
+Error codes: `session_expired`, `rate_limited`, `not_found`, `not_authenticated`, `unknown_error`.
 
 ### JSON Field Names
 
@@ -393,6 +413,9 @@ outlook event-respond 42 accept
 
 # View event with attendees
 outlook event 42
+
+# View full conversation thread
+outlook thread 3
 
 # Send a quick reply
 outlook reply 3 "Received, will review today."
