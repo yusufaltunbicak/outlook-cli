@@ -17,6 +17,7 @@ from ._common import (
     print_success,
     to_json_envelope,
 )
+from .mail import _show_attachment_info
 
 
 def _parse_schedule_time(s: str) -> datetime:
@@ -100,12 +101,13 @@ def _print_schedule_entries(entries: list[dict]) -> None:
 @click.argument("body")
 @click.argument("at")
 @click.option("--cc", multiple=True, help="CC recipients")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @_handle_api_error
-def schedule(to: str, subject: str, body: str, at: str, cc: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
+def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
     """Schedule an email to be sent later.
 
     AT is the scheduled send time. Accepts:
@@ -130,14 +132,23 @@ def schedule(to: str, subject: str, body: str, at: str, cc: tuple, is_html: bool
             console.print(f"  [bold]CC:[/bold] {', '.join(cc_list)}")
         console.print(f"  [bold]Subject:[/bold] {subject}")
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
+        _show_attachment_info(attach)
         console.print(f"  [bold]Scheduled:[/bold] {local_send.strftime('%Y-%m-%d %H:%M')}")
         click.confirm("Schedule this email?", abort=True)
 
     client = _get_client()
-    client.schedule_send(
-        to=to_list, subject=subject, body=body, cc=cc_list,
-        html=is_html, send_at=send_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
-    )
+    send_at_str = send_at.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    if attach:
+        # Draft flow: create draft -> attach files -> schedule draft
+        email = client.create_draft(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
+        client.attach_files(email.id, list(attach))
+        client.schedule_draft(email.id, send_at_str)
+    else:
+        client.schedule_send(
+            to=to_list, subject=subject, body=body, cc=cc_list,
+            html=is_html, send_at=send_at_str,
+        )
 
     if _wants_json(as_json):
         click.echo(to_json_envelope({"status": "scheduled", "to": to_list, "subject": subject, "scheduled_at": send_at.isoformat()}))

@@ -8,7 +8,7 @@ import httpx
 
 from urllib.parse import quote
 
-from .constants import BASE_URL, CACHE_DIR, DEFERRED_SEND_PROPERTY_ID, ID_MAP_FILE, OWA_SERVICE_URL, SCHEDULED_FILE, USER_AGENT
+from .constants import ATTACHMENT_SIZE_THRESHOLD, BASE_URL, CACHE_DIR, DEFERRED_SEND_PROPERTY_ID, ID_MAP_FILE, OWA_SERVICE_URL, SCHEDULED_FILE, USER_AGENT
 from .exceptions import RateLimitError, ResourceNotFoundError, TokenExpiredError
 from .models import Attachment, Contact, Email, Event, Folder
 
@@ -545,6 +545,84 @@ class OutlookClient:
         real_id = self._resolve_id(message_id)
         resp = self._get(f"/messages/{real_id}/attachments/{attachment_id}")
         return Attachment.from_api(resp)
+
+    def add_attachment(self, message_id: str, file_path: str) -> dict:
+        """Add a file attachment to a draft message.
+
+        Uses inline base64 for files under 3 MB, upload session for larger.
+        message_id can be a display number or real Outlook ID.
+        """
+        import base64
+        import mimetypes
+
+        path = Path(file_path)
+        if not path.exists():
+            raise FileNotFoundError(f"File not found: {file_path}")
+
+        real_id = self._resolve_id(message_id)
+        file_size = path.stat().st_size
+
+        if file_size < ATTACHMENT_SIZE_THRESHOLD:
+            content = base64.b64encode(path.read_bytes()).decode()
+            content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+            return self._post(f"/messages/{real_id}/attachments", json={
+                "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+                "Name": path.name,
+                "ContentType": content_type,
+                "ContentBytes": content,
+            })
+        else:
+            return self._upload_large_attachment(real_id, path, file_size)
+
+    def _upload_large_attachment(self, real_id: str, path: Path, file_size: int) -> dict:
+        """Upload a large file via an upload session (for files >= 3 MB)."""
+        session = self._post(f"/messages/{real_id}/attachments/createuploadsession", json={
+            "AttachmentItem": {
+                "attachmentType": "file",
+                "name": path.name,
+                "size": file_size,
+            }
+        })
+        upload_url = session["uploadUrl"]
+
+        chunk_size = 4 * 1024 * 1024  # 4 MB chunks
+        result: dict = {}
+        with open(path, "rb") as f:
+            offset = 0
+            while offset < file_size:
+                chunk = f.read(chunk_size)
+                chunk_end = offset + len(chunk) - 1
+                resp = httpx.put(
+                    upload_url,
+                    content=chunk,
+                    headers={
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {offset}-{chunk_end}/{file_size}",
+                    },
+                    timeout=120,
+                )
+                resp.raise_for_status()
+                if resp.content:
+                    result = resp.json()
+                offset += len(chunk)
+        return result
+
+    def attach_files(self, message_id: str, file_paths: list[str]) -> None:
+        """Attach multiple files to a draft message."""
+        for fp in file_paths:
+            self.add_attachment(message_id, fp)
+
+    def create_forward_draft(self, message_id: str, to: list[str], comment: str = "") -> Email:
+        """Create a forward draft without sending."""
+        real_id = self._resolve_id(message_id)
+        payload: dict = {
+            "ToRecipients": [{"EmailAddress": {"Address": addr}} for addr in to],
+        }
+        if comment:
+            payload["Comment"] = comment
+        data = self._post(f"/messages/{real_id}/createforward", json=payload)
+        return Email.from_api(data)
 
     # ------------------------------------------------------------------
     # Calendar

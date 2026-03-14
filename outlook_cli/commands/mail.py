@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import click
 
 from ._common import (
@@ -17,6 +19,27 @@ from ._common import (
     save_json,
     to_json_envelope,
 )
+
+
+def _format_file_size(size: int) -> str:
+    """Human-readable file size."""
+    if size < 1024:
+        return f"{size} B"
+    if size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    return f"{size / (1024 * 1024):.1f} MB"
+
+
+def _show_attachment_info(file_paths: tuple[str, ...]) -> None:
+    """Print attachment info in confirmation prompt."""
+    if not file_paths:
+        return
+    parts = []
+    for fp in file_paths:
+        name = os.path.basename(fp)
+        size = os.path.getsize(fp)
+        parts.append(f"{name} ({_format_file_size(size)})")
+    console.print(f"  [bold]Attachments:[/bold] {', '.join(parts)}")
 
 
 @click.command()
@@ -138,12 +161,13 @@ def thread(message_id: str, as_json: bool):
 @click.argument("subject")
 @click.argument("body")
 @click.option("--cc", multiple=True, help="CC recipients")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
 @_handle_api_error
-def send(to: str, subject: str, body: str, cc: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
+def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
     """Send an email. TO can be comma-separated for multiple recipients."""
     from ..signature_manager import append_signature, get_signature
 
@@ -161,10 +185,18 @@ def send(to: str, subject: str, body: str, cc: tuple, is_html: bool, sig_name: s
             console.print(f"  [bold]CC:[/bold] {', '.join(cc_list)}")
         console.print(f"  [bold]Subject:[/bold] {subject}")
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
+        _show_attachment_info(attach)
         click.confirm("Send this email?", abort=True)
 
     client = _get_client()
-    client.send_mail(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
+
+    if attach:
+        # Draft flow: create draft -> attach files -> send
+        email = client.create_draft(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
+        client.attach_files(email.id, list(attach))
+        client.send_draft(email.id)
+    else:
+        client.send_mail(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
 
     if _wants_json(as_json):
         click.echo(to_json_envelope({"status": "sent", "to": to_list, "subject": subject}))
@@ -177,11 +209,12 @@ def send(to: str, subject: str, body: str, cc: tuple, is_html: bool, sig_name: s
 @click.argument("subject")
 @click.argument("body")
 @click.option("--cc", multiple=True, help="CC recipients")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @_handle_api_error
-def draft(to: str, subject: str, body: str, cc: tuple, is_html: bool, sig_name: str | None, as_json: bool):
+def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool):
     """Create a draft email without sending. TO can be comma-separated."""
     from ..signature_manager import append_signature, get_signature
 
@@ -194,6 +227,9 @@ def draft(to: str, subject: str, body: str, cc: tuple, is_html: bool, sig_name: 
     to_list = [addr.strip() for addr in to.split(",")]
     cc_list = list(cc) if cc else None
     email = client.create_draft(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
+
+    if attach:
+        client.attach_files(email.id, list(attach))
 
     if _wants_json(as_json):
         click.echo(to_json_envelope(email))
@@ -223,17 +259,27 @@ def draft_send(message_id: str, yes: bool):
 @click.argument("message_id")
 @click.argument("body")
 @click.option("--all", "reply_all", is_flag=True, help="Reply to all recipients")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
 @_handle_api_error
-def reply(message_id: str, body: str, reply_all: bool, yes: bool):
+def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool):
     """Reply to an email."""
     client = _get_client()
     if not yes:
         action = "Reply all" if reply_all else "Reply"
         console.print(f"  [bold]{action} to #{message_id}[/bold]")
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
+        _show_attachment_info(attach)
         click.confirm("Send this reply?", abort=True)
-    client.reply(message_id, body, reply_all=reply_all)
+
+    if attach:
+        # Draft flow: create reply draft -> attach -> send
+        draft_email = client.create_reply_draft(message_id, comment=body, reply_all=reply_all)
+        client.attach_files(draft_email.id, list(attach))
+        client.send_draft(draft_email.id)
+    else:
+        client.reply(message_id, body, reply_all=reply_all)
+
     action = "Reply all" if reply_all else "Reply"
     print_success(f"{action} sent for message #{message_id}")
 
@@ -242,11 +288,12 @@ def reply(message_id: str, body: str, reply_all: bool, yes: bool):
 @click.argument("message_id")
 @click.argument("body", default="")
 @click.option("--all", "reply_all", is_flag=True, help="Reply to all recipients")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--html", "is_html", is_flag=True, help="Body is HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @_handle_api_error
-def reply_draft(message_id: str, body: str, reply_all: bool, is_html: bool, sig_name: str | None, as_json: bool):
+def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool):
     """Create a reply draft without sending."""
     from ..signature_manager import append_signature, get_signature
 
@@ -257,6 +304,10 @@ def reply_draft(message_id: str, body: str, reply_all: bool, is_html: bool, sig_
 
     client = _get_client()
     email = client.create_reply_draft(message_id, comment=body, reply_all=reply_all, html=is_html)
+
+    if attach:
+        client.attach_files(email.id, list(attach))
+
     action = "Reply-all" if reply_all else "Reply"
     if _wants_json(as_json):
         click.echo(to_json_envelope(email))
@@ -268,16 +319,27 @@ def reply_draft(message_id: str, body: str, reply_all: bool, is_html: bool, sig_
 @click.argument("message_id")
 @click.argument("to")
 @click.option("--comment", "-c", default="", help="Add a comment to the forwarded message")
+@click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
 @_handle_api_error
-def forward(message_id: str, to: str, comment: str, yes: bool):
+def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool):
     """Forward an email."""
     to_list = [addr.strip() for addr in to.split(",")]
     if not yes:
         console.print(f"  [bold]Forward #{message_id} to:[/bold] {', '.join(to_list)}")
         if comment:
             console.print(f"  [bold]Comment:[/bold] {comment[:100]}{'...' if len(comment) > 100 else ''}")
+        _show_attachment_info(attach)
         click.confirm("Forward this email?", abort=True)
+
     client = _get_client()
-    client.forward(message_id, to_list, comment=comment)
+
+    if attach:
+        # Draft flow: create forward draft -> attach -> send
+        draft_email = client.create_forward_draft(message_id, to_list, comment=comment)
+        client.attach_files(draft_email.id, list(attach))
+        client.send_draft(draft_email.id)
+    else:
+        client.forward(message_id, to_list, comment=comment)
+
     print_success(f"Message #{message_id} forwarded to {to}")

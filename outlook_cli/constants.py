@@ -24,6 +24,10 @@ CONFIG_DIR = Path(os.environ.get("OUTLOOK_CLI_CONFIG", Path.home() / ".config" /
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 SIGNATURES_DIR = CONFIG_DIR / "signatures"
 
+# Attachment size threshold: inline base64 for files under 3 MB,
+# upload session for larger files.
+ATTACHMENT_SIZE_THRESHOLD = 3 * 1024 * 1024  # 3 MB
+
 # Extended property for deferred/scheduled send
 DEFERRED_SEND_PROPERTY_ID = "SystemTime 0x3FEF"
 
