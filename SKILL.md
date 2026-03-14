@@ -2,7 +2,7 @@
 name: outlook-cli
 description: CLI skill for Outlook 365 to read, send, search, and manage emails, calendar events, categories, and contacts from the terminal without API keys or admin consent
 author: yusufaltunbicak
-version: "0.1.1"
+version: "0.1.2"
 tags:
   - outlook
   - email
