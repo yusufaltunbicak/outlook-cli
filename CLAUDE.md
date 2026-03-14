@@ -16,7 +16,7 @@ outlook inbox                 # verify it works
 ```
 
 ```sh
-pytest               # run all 45 unit tests
+pytest               # run all 83 unit tests
 pytest -m smoke      # run only smoke tests (require live token)
 ```
 
@@ -25,7 +25,7 @@ pytest -m smoke      # run only smoke tests (require live token)
 ### Two API layers
 
 1. **Outlook REST v2** (`outlook.office.com/api/v2.0/me`) — standard mail, calendar, contacts, folders, per-message categories. Used by `OutlookClient` in `client.py`.
-2. **OWA service.svc** (`outlook.cloud.microsoft/owa/service.svc`) — reverse-engineered endpoint for master category list operations (create/delete/rename/recolor). Uses a non-standard pattern: JSON payload goes in the `x-owa-urlpostdata` header, body is empty. Used by `category_manager.py`.
+2. **OWA service.svc** (`outlook.cloud.microsoft/owa/service.svc`) — reverse-engineered endpoint for master category list operations (create/delete/rename/recolor) and message pinning (`UpdateItem` with `RenewTime`). Uses a non-standard pattern: JSON payload goes in the `x-owa-urlpostdata` header, body is empty. Used by `category_manager.py` and `client.py` (`pin_message`).
 
 ### Module responsibilities
 
@@ -48,8 +48,8 @@ pytest -m smoke      # run only smoke tests (require live token)
 - **`auth.py`** — Playwright-based token capture. Intercepts bearer tokens from OWA network requests. Picks the best token by testing against multiple endpoints. Caches token + browser SSO state.
 - **`category_manager.py`** — Standalone module for OWA master category operations. Has its own `_owa_request` helper (separate from `client.py`'s `_owa_action`). `rename_category` and `clear_category` do bulk message propagation via REST v2.
 - **`signature_manager.py`** — Signature management: pull from SentItems, save as HTML files in `~/.config/outlook-cli/signatures/`, append to outgoing emails. Handles plain text → HTML conversion when signature is used.
-- **`models.py`** — Dataclasses (`Email`, `Folder`, `Attachment`, `Event`, `Attendee`, `Contact`, `EmailAddress`) with `from_api()` class methods that parse Outlook REST v2 JSON. `Email` includes `categories: list[str]`. `Event` includes `attendees: list[Attendee]`, `recurrence`, `event_type` (SingleInstance/Occurrence/Exception/SeriesMaster), `series_master_id`, `display_num`.
-- **`formatter.py`** — Rich table output. `Console(stderr=True)` so JSON piping stays clean on stdout. `print_thread()` for conversation view.
+- **`models.py`** — Dataclasses (`Email`, `Folder`, `Attachment`, `Event`, `Attendee`, `Contact`, `EmailAddress`) with `from_api()` class methods that parse Outlook REST v2 JSON. `Email` includes `categories: list[str]`, `flag_status` ("notFlagged"/"flagged"/"complete"), `flag_due: datetime | None`. `Event` includes `attendees: list[Attendee]`, `recurrence`, `event_type` (SingleInstance/Occurrence/Exception/SeriesMaster), `series_master_id`, `display_num`.
+- **`formatter.py`** — Rich table output. `Console(stderr=True)` so JSON piping stays clean on stdout. `print_thread()` for conversation view. Inbox flags column shows `*` (unread), `@` (attachment), `!` (flagged), `v` (flag complete). Email detail view shows flag status with due date.
 - **`serialization.py`** — `to_json_envelope()` wraps data in `{ok, schema_version, data}` for stdout. `error_json()` for structured errors. `to_json()` / `save_json()` for raw file export.
 - **`config.py`** — YAML config loader with deep-merge defaults.
 - **`constants.py`** — URLs, cache/config paths.
@@ -57,7 +57,7 @@ pytest -m smoke      # run only smoke tests (require live token)
 ### Key patterns
 
 - **Display number ID mapping**: Messages and events get short `#1, #2...` numbers stored in `~/.cache/outlook-cli/id_map.json`. Users reference items by these numbers. The map is capped at 500 entries with LRU eviction. Events share the same ID map as messages.
-- **Multi-ID commands**: `delete`, `move`, `mark-read`, `categorize`, `uncategorize` accept multiple message IDs via Click's `nargs=-1`. The variadic argument comes first, fixed argument (destination/category) last.
+- **Multi-ID commands**: `delete`, `move`, `mark-read`, `categorize`, `uncategorize`, `flag`, `pin` accept multiple message IDs via Click's `nargs=-1`. The variadic argument comes first, fixed argument (destination/category) last.
 - **Send confirmation**: `send`, `reply`, `forward`, `draft-send`, `schedule`, `schedule-draft`, `event-create` show details and require confirmation before action. All accept `-y` to skip. Draft-creation commands (`draft`, `reply-draft`) do NOT require confirmation since nothing is sent. `event-delete` also confirms unless `-y`.
 - **Draft reply**: `reply-draft` uses `createReply` / `createReplyAll` REST v2 endpoints to create reply drafts with original recipients pre-filled. Body argument is optional (default empty).
 - **Scheduled send**: Uses `PidTagDeferredSendTime` (0x3FEF) extended property. `schedule` uses `/sendmail` with the property inline. `schedule-draft` PATCHes an existing draft then sends it. Tracked locally in `scheduled.json` (REST v2 doesn't support `$filter`/`$expand` on extended properties). `schedule-list` cross-references local tracking with Drafts folder by subject to find matching draft IDs. `schedule-cancel` deletes both local tracking and the server draft when found. Time formats: `+30m`, `+1h`, `tomorrow 09:00`, `2024-03-15T10:00`.

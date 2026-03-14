@@ -65,13 +65,17 @@ outlook send "to@email.com" "Subject" "Body"
 outlook send "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com -y
 outlook send "to@email.com" "Subject" "Body" --signature MySignature
 outlook send "to@email.com" "Subject" "<h1>HTML</h1>" --html -s MySignature
+outlook send "to@email.com" "Report" "See attached" -a report.pdf
+outlook send "to@email.com" "Files" "Here" -a file1.pdf -a file2.xlsx
 outlook reply 3 "Thanks!"
 outlook reply 3 "Thanks!" --all
+outlook reply 3 "Here it is" --attach requested-file.pdf
 outlook reply-draft 3                          # create reply draft without sending
 outlook reply-draft 3 "Will check" --all       # reply-all draft with body
 outlook reply-draft 3 "<p>HTML</p>" --html     # HTML body (preserves quoted original)
 outlook reply-draft 3 "Body" -s MySignature    # reply draft with signature
 outlook forward 3 "to@email.com" --comment "FYI"
+outlook forward 3 "to@email.com" -a extra-doc.pdf
 ```
 
 ### Drafts
@@ -79,6 +83,7 @@ outlook forward 3 "to@email.com" --comment "FYI"
 ```sh
 outlook draft "to@email.com" "Subject" "Body"              # create draft
 outlook draft "to@email.com" "Subject" "Body" --cc e@f.com # draft with CC
+outlook draft "to@email.com" "Subject" "Body" -a file.pdf  # draft with attachment
 outlook draft "to@email.com" "Subject" "Body" -s MySignature # draft with signature
 outlook draft-send 3                                        # send a draft (with confirmation)
 outlook draft-send 3 -y                                     # send without confirmation
@@ -92,6 +97,7 @@ outlook schedule "to@email.com" "Subject" "Body" "+30m" -y    # 30 min, skip con
 outlook schedule "to@email.com" "Subject" "Body" "tomorrow 09:00"
 outlook schedule "to@email.com" "Subject" "Body" "2026-03-15T10:00"
 outlook schedule "to@email.com" "Subject" "Body" "+2h30m" --html -s MySignature
+outlook schedule "to@email.com" "Report" "See attached" "+1h" -a report.pdf
 
 outlook schedule-draft 3 "+1h"            # schedule an existing draft
 outlook schedule-draft 3 "tomorrow 09:00" # schedule reply draft for morning
@@ -157,6 +163,15 @@ outlook mark-read 3 4 5          # mark multiple as read
 outlook mark-read 3 --unread     # mark as unread
 outlook delete 3                 # delete (with confirmation)
 outlook delete 3 4 5 -y          # delete multiple without confirmation
+outlook flag 3                   # flag for follow-up
+outlook flag 3 --due tomorrow    # flag with due date
+outlook flag 3 --due 2026-03-20  # flag with specific date
+outlook flag 3 --due +3d         # flag due in 3 days
+outlook flag 3 --complete        # mark flag as complete
+outlook flag 3 --clear           # remove flag
+outlook pin 3                    # pin to top of inbox
+outlook pin 3 4 5                # pin multiple
+outlook pin 3 --unpin            # unpin
 ```
 
 ### Calendar
@@ -253,7 +268,7 @@ All JSON output uses a structured envelope:
 1. `outlook login` opens Chromium via Playwright
 2. Intercepts the OWA bearer token from network requests
 3. Uses the token against Outlook REST API v2 (`outlook.office.com/api/v2.0/`)
-4. Category management uses OWA `service.svc` (reverse-engineered `UpdateMasterCategoryList`)
+4. Category management and message pinning use OWA `service.svc` (reverse-engineered internal endpoints)
 5. Messages get short display numbers (#1, #2...) mapped to real Outlook IDs
 6. Auto re-login on token expiry via cached browser SSO state
 
@@ -274,7 +289,7 @@ rm -rf ~/.cache/outlook-cli/
 
 ## Undocumented API Notice
 
-Category management commands (`categories`, `category-create`, `category-delete`, `category-rename`) use a reverse-engineered OWA internal endpoint (`service.svc`) that is **not a public or documented Microsoft API**. These endpoints may change or stop working at any time without notice. All other commands use the [Outlook REST API v2.0](https://learn.microsoft.com/en-us/previous-versions/office/office-365-api/api/version-2.0/mail-rest-operations), which is a documented (though deprecated in favor of Microsoft Graph) API.
+Category management commands (`categories`, `category-create`, `category-delete`, `category-rename`) and the `pin` command use a reverse-engineered OWA internal endpoint (`service.svc`) that is **not a public or documented Microsoft API**. These endpoints may change or stop working at any time without notice. All other commands use the [Outlook REST API v2.0](https://learn.microsoft.com/en-us/previous-versions/office/office-365-api/api/version-2.0/mail-rest-operations), which is a documented (though deprecated in favor of Microsoft Graph) API.
 
 ## Config
 

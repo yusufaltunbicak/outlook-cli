@@ -2,7 +2,7 @@
 name: outlook-cli
 description: CLI skill for Outlook 365 to read, send, search, and manage emails, calendar events, categories, and contacts from the terminal without API keys or admin consent
 author: yusufaltunbicak
-version: "0.1.0"
+version: "0.1.1"
 tags:
   - outlook
   - email
@@ -11,13 +11,14 @@ tags:
   - events
   - meetings
   - categories
+  - attachments
   - terminal
   - cli
 ---
 
 # outlook-cli Skill
 
-Use this skill when the user wants to read, send, search, or manage Outlook 365 emails and calendar events from the terminal. Also supports recurring events, shared calendars, free/busy scheduling, categories, contacts, and attachments.
+Use this skill when the user wants to read, send, search, or manage Outlook 365 emails and calendar events from the terminal. Also supports file attachments, follow-up flags, message pinning, recurring events, shared calendars, free/busy scheduling, categories, contacts, and signatures.
 
 ## Prerequisites
 
@@ -82,10 +83,13 @@ outlook send "to@email.com" "Subject" "Body" -y                  # Skip confirma
 outlook send "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com
 outlook send "to@email.com" "Subject" "<h1>Hi</h1>" --html
 outlook send "to@email.com" "Subject" "Body" --signature default  # Append saved signature
+outlook send "to@email.com" "Report" "See attached" -a report.pdf         # With attachment
+outlook send "to@email.com" "Files" "Here" -a file1.pdf -a file2.xlsx     # Multiple attachments
 
 outlook reply 3 "Thanks!"                       # Shows confirmation prompt
 outlook reply 3 "Thanks!" -y                    # Skip confirmation
 outlook reply 3 "Noted, will fix." --all         # Reply all
+outlook reply 3 "Here it is" -a requested.pdf    # Reply with attachment
 outlook reply-draft 3                            # Create reply draft (empty body, edit in Outlook)
 outlook reply-draft 3 "Will review tomorrow"     # Create reply draft with body
 outlook reply-draft 3 "<p>HTML reply</p>" --html # HTML body (preserves quoted original)
@@ -96,6 +100,7 @@ outlook reply-draft 3 --json                     # JSON output
 outlook forward 3 "to@email.com"                # Shows confirmation prompt
 outlook forward 3 "to@email.com" -y              # Skip confirmation
 outlook forward 3 "to@email.com" --comment "FYI"
+outlook forward 3 "to@email.com" -a extra.pdf    # Forward with additional attachment
 ```
 
 ### Drafts
@@ -104,6 +109,7 @@ outlook forward 3 "to@email.com" --comment "FYI"
 outlook draft "to@email.com" "Subject" "Body"                    # Create draft
 outlook draft "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com   # Draft with CC
 outlook draft "to@email.com" "Subject" "<h1>Hi</h1>" --html     # HTML draft
+outlook draft "to@email.com" "Subject" "Body" -a doc.pdf         # Draft with attachment
 outlook draft "to@email.com" "Subject" "Body" --signature default # Draft with signature
 outlook draft "to@email.com" "Subject" "Body" --json             # JSON output
 outlook draft-send 3                                              # Send draft (shows confirmation)
@@ -170,6 +176,7 @@ outlook schedule "to@email.com" "Subject" "Body" "2026-03-15T10:00" # Exact date
 outlook schedule "to@email.com" "Subject" "Body" "+2h30m"           # Relative offset
 outlook schedule "to@email.com" "Subject" "Body" "+1h" --html       # HTML body
 outlook schedule "to@email.com" "Subject" "Body" "+1h" -s default   # With signature
+outlook schedule "to@email.com" "Report" "See attached" "+1h" -a report.pdf  # With attachment
 outlook schedule "to@email.com" "Subject" "Body" "+1h" --json       # JSON output
 
 outlook schedule-draft 3 "+1h"                                      # Schedule existing draft
@@ -204,6 +211,16 @@ outlook move 3 "Archive"            # Move to folder (accepts display name)
 outlook move 1 2 3 "Archive"        # Move multiple messages
 outlook delete 3                   # Delete (with confirmation)
 outlook delete 1 2 3 -y            # Delete multiple without confirmation
+outlook flag 3                     # Flag for follow-up
+outlook flag 3 4 5                 # Flag multiple messages
+outlook flag 3 --due tomorrow      # Flag with due date
+outlook flag 3 --due 2026-03-20    # Flag with specific date
+outlook flag 3 --due +3d           # Flag due in 3 days
+outlook flag 3 --complete          # Mark flag as complete
+outlook flag 3 --clear             # Remove flag
+outlook pin 3                     # Pin to top of inbox
+outlook pin 3 4 5                 # Pin multiple messages
+outlook pin 3 --unpin             # Unpin message
 ```
 
 ### Attachments
@@ -343,6 +360,8 @@ Email objects (`inbox`, `search`, `folder` with `--json`):
 | `importance` | string | `"Normal"` |
 | `conversation_id` | string | Outlook conversation ID |
 | `categories` | list[string] | `["Spam", "FYI"]` |
+| `flag_status` | string | `"notFlagged"`, `"flagged"`, `"complete"` |
+| `flag_due` | string\|null | `"2026-03-20T23:59:59"` or `null` |
 | `scheduled_send` | string\|null | `"2026-03-15T10:00:00Z"` or `null` |
 
 Event objects (`calendar`, `event`, `event-instances` with `--json`):
@@ -420,8 +439,17 @@ outlook thread 3
 # Send a quick reply
 outlook reply 3 "Received, will review today."
 
+# Send email with attachments
+outlook send "to@email.com" "Report" "See attached" -a report.pdf -a data.xlsx -y
+
 # Download all attachments from a message
 outlook attachments 5 -d --save-to ~/Downloads
+
+# Flag message for follow-up with due date
+outlook flag 3 --due tomorrow
+
+# Pin important messages to top of inbox
+outlook pin 3 4
 
 # Categorize a batch of messages
 outlook categorize 1 2 3 "FYI"
@@ -470,5 +498,6 @@ outlook event-respond 42 accept
 - Token is cached with `chmod 600` (owner-only read/write).
 - Browser state saved for SSO — avoids repeated logins.
 - `send`, `reply`, `forward`, `draft-send`, `schedule`, `schedule-draft`, `event-create`, `event-delete`, `delete`, and `category-delete` ask for confirmation by default (use `-y` to skip).
+- `flag`, `pin`, `mark-read`, `categorize` do NOT require confirmation (safe, reversible operations).
 - Do not share or log bearer tokens — they grant full mailbox access.
 - Prefer `outlook login` over manually copying tokens.
