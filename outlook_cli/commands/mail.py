@@ -10,6 +10,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     cfg,
     console,
     print_email,
@@ -54,6 +55,7 @@ def _show_attachment_info(file_paths: tuple[str, ...]) -> None:
 @click.option("--no-category", "no_category", is_flag=True, help="Only uncategorized messages")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--output", "-o", type=click.Path(), help="Save output to file")
+@account_option
 @_handle_api_error
 def inbox(
     max_count: int | None,
@@ -67,6 +69,7 @@ def inbox(
     no_category: bool,
     as_json: bool,
     output: str | None,
+    account_name: str | None,
 ):
     """Show inbox messages."""
     client = _get_client()
@@ -113,8 +116,9 @@ def inbox(
 @click.argument("message_id")
 @click.option("--raw", is_flag=True, help="Show raw HTML body")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def read(message_id: str, raw: bool, as_json: bool):
+def read(message_id: str, raw: bool, as_json: bool, account_name: str | None):
     """Read an email by its display number."""
     client = _get_client()
     email = client.get_message(message_id)
@@ -137,8 +141,9 @@ def read(message_id: str, raw: bool, as_json: bool):
 @click.command()
 @click.argument("message_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def thread(message_id: str, as_json: bool):
+def thread(message_id: str, as_json: bool, account_name: str | None):
     """Show the full conversation thread for a message."""
     from ..formatter import print_thread
 
@@ -166,8 +171,9 @@ def thread(message_id: str, as_json: bool):
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
+@account_option
 @_handle_api_error
-def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
+def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
     """Send an email. TO can be comma-separated for multiple recipients."""
     from ..signature_manager import append_signature, get_signature
 
@@ -213,8 +219,9 @@ def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bo
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool):
+def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
     """Create a draft email without sending. TO can be comma-separated."""
     from ..signature_manager import append_signature, get_signature
 
@@ -240,8 +247,9 @@ def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: b
 @click.command(name="draft-send")
 @click.argument("message_id")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
+@account_option
 @_handle_api_error
-def draft_send(message_id: str, yes: bool):
+def draft_send(message_id: str, yes: bool, account_name: str | None):
     """Send an existing draft by its message number."""
     client = _get_client()
     if not yes:
@@ -261,8 +269,9 @@ def draft_send(message_id: str, yes: bool):
 @click.option("--all", "reply_all", is_flag=True, help="Reply to all recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
+@account_option
 @_handle_api_error
-def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool):
+def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool, account_name: str | None):
     """Reply to an email."""
     client = _get_client()
     if not yes:
@@ -292,8 +301,9 @@ def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool)
 @click.option("--html", "is_html", is_flag=True, help="Body is HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool):
+def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
     """Create a reply draft without sending."""
     from ..signature_manager import append_signature, get_signature
 
@@ -321,8 +331,9 @@ def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_h
 @click.option("--comment", "-c", default="", help="Add a comment to the forwarded message")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
+@account_option
 @_handle_api_error
-def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool):
+def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool, account_name: str | None):
     """Forward an email."""
     to_list = [addr.strip() for addr in to.split(",")]
     if not yes:

@@ -8,6 +8,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     cfg,
     console,
     print_folders,
@@ -21,8 +22,9 @@ from ._common import (
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--output", "-o", type=click.Path(), help="Save output to file")
+@account_option
 @_handle_api_error
-def folders(as_json: bool, output: str | None):
+def folders(as_json: bool, output: str | None, account_name: str | None):
     """List mail folders."""
     client = _get_client()
     folder_list = client.get_folders()
@@ -49,6 +51,7 @@ def folders(as_json: bool, output: str | None):
 @click.option("--category", default=None, help="Filter by category name")
 @click.option("--no-category", "no_category", is_flag=True, help="Only uncategorized messages")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
 def folder(
     name: str,
@@ -62,6 +65,7 @@ def folder(
     category: str | None,
     no_category: bool,
     as_json: bool,
+    account_name: str | None,
 ):
     """Show messages in a specific folder."""
     client = _get_client()

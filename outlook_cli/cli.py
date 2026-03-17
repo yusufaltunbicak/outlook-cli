@@ -5,6 +5,7 @@ from __future__ import annotations
 import click
 
 from .commands import (
+    account as account_mod,
     attachments as attachments_mod,
     auth as auth_mod,
     calendar as calendar_mod,
@@ -29,6 +30,7 @@ def cli():
 # Auth
 cli.add_command(auth_mod.login)
 cli.add_command(auth_mod.whoami)
+cli.add_command(account_mod.account)
 
 # Mail - Read & Write
 cli.add_command(mail_mod.inbox)

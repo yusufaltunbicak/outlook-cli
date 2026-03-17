@@ -6,6 +6,7 @@ import click
 
 from ._common import (
     _handle_api_error,
+    account_option,
     cfg,
     console,
     get_token,
@@ -15,8 +16,9 @@ from ._common import (
 
 @click.command("signature-pull")
 @click.option("--name", "-n", default=None, help="Name for the signature (default: auto-detect)")
+@account_option
 @_handle_api_error
-def signature_pull(name: str | None):
+def signature_pull(name: str | None, account_name: str | None):
     """Extract your signature from a recent sent email and save it."""
     from ..signature_manager import pull_signature, save_signature
 
@@ -32,7 +34,8 @@ def signature_pull(name: str | None):
 
 
 @click.command("signature-list")
-def signature_list():
+@account_option
+def signature_list(account_name: str | None):
     """List saved signatures."""
     from ..signature_manager import list_signatures
 
@@ -47,8 +50,9 @@ def signature_list():
 
 @click.command("signature-show")
 @click.argument("name")
+@account_option
 @_handle_api_error
-def signature_show(name: str):
+def signature_show(name: str, account_name: str | None):
     """Preview a saved signature."""
     from ..signature_manager import get_signature
 
@@ -62,8 +66,9 @@ def signature_show(name: str):
 @click.command("signature-delete")
 @click.argument("name")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def signature_delete(name: str, yes: bool):
+def signature_delete(name: str, yes: bool, account_name: str | None):
     """Delete a saved signature."""
     from ..signature_manager import delete_signature
 

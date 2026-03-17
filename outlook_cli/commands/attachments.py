@@ -11,6 +11,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     print_attachments,
     print_success,
     to_json_envelope,
@@ -22,8 +23,9 @@ from ._common import (
 @click.option("-d", "--download", is_flag=True, help="Download all attachments")
 @click.option("--save-to", type=click.Path(), default=".", help="Download directory")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def attachments(message_id: str, download: bool, save_to: str, as_json: bool):
+def attachments(message_id: str, download: bool, save_to: str, as_json: bool, account_name: str | None):
     """List or download attachments for a message."""
     client = _get_client()
     atts = client.get_attachments(message_id)

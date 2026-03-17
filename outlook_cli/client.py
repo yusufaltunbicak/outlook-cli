@@ -8,7 +8,8 @@ import httpx
 
 from urllib.parse import quote
 
-from .constants import ATTACHMENT_SIZE_THRESHOLD, BASE_URL, CACHE_DIR, DEFERRED_SEND_PROPERTY_ID, ID_MAP_FILE, OWA_SERVICE_URL, SCHEDULED_FILE, USER_AGENT
+from . import account as account_service
+from .constants import ATTACHMENT_SIZE_THRESHOLD, BASE_URL, DEFERRED_SEND_PROPERTY_ID, OWA_SERVICE_URL, USER_AGENT
 from .exceptions import RateLimitError, ResourceNotFoundError, TokenExpiredError
 from .models import Attachment, Contact, Email, Event, Folder
 
@@ -74,7 +75,9 @@ class OutlookClient:
 
     MAX_ID_MAP_SIZE = 500
 
-    def __init__(self, token: str):
+    def __init__(self, token: str, account_name: str | None = None):
+        self.account_name = account_service.resolve_account_name(account_name)
+        self._paths = account_service.get_account_paths(self.account_name)
         self._token = token
         self._client = httpx.Client(
             base_url=BASE_URL,
@@ -587,16 +590,16 @@ class OutlookClient:
         return entry
 
     def _load_scheduled(self) -> list[dict]:
-        if SCHEDULED_FILE.exists():
+        if self._paths.scheduled_file.exists():
             try:
-                return json.loads(SCHEDULED_FILE.read_text())
+                return json.loads(self._paths.scheduled_file.read_text())
             except (json.JSONDecodeError, OSError):
                 pass
         return []
 
     def _save_scheduled(self, entries: list[dict]) -> None:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        SCHEDULED_FILE.write_text(json.dumps(entries, indent=2))
+        self._paths.scheduled_file.parent.mkdir(parents=True, exist_ok=True)
+        self._paths.scheduled_file.write_text(json.dumps(entries, indent=2))
 
     def search_messages(self, query: str, top: int = 25) -> list[Email]:
         params = {
@@ -1044,16 +1047,16 @@ class OutlookClient:
             del self._id_map[k]
 
     def _load_id_map(self) -> dict[str, str]:
-        if ID_MAP_FILE.exists():
+        if self._paths.id_map_file.exists():
             try:
-                return json.loads(ID_MAP_FILE.read_text())
+                return json.loads(self._paths.id_map_file.read_text())
             except (json.JSONDecodeError, OSError):
                 pass
         return {}
 
     def _save_id_map(self) -> None:
-        CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        ID_MAP_FILE.write_text(json.dumps(self._id_map))
+        self._paths.id_map_file.parent.mkdir(parents=True, exist_ok=True)
+        self._paths.id_map_file.write_text(json.dumps(self._id_map))
 
     # ------------------------------------------------------------------
     # HTTP helpers

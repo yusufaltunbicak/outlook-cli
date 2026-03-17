@@ -11,19 +11,19 @@ from outlook_cli.commands import attachments, auth as auth_cmd, categories, cont
 
 def test_login_command_reports_success(runner, tty_mode, monkeypatch):
     messages = []
-    monkeypatch.setattr(auth_cmd, "do_login", lambda force=False, debug=False: "token")
+    monkeypatch.setattr(auth_cmd, "do_login", lambda force=False, debug=False, **kwargs: "token")
     monkeypatch.setattr(auth_cmd, "verify_token", lambda token: True)
     monkeypatch.setattr(auth_cmd, "print_success", lambda msg: messages.append(msg))
 
     result = runner.invoke(auth_cmd.login, ["--force"])
 
     assert result.exit_code == 0
-    assert messages == ["Logged in successfully. Token cached."]
+    assert messages == ["Logged in successfully for account 'default'. Token cached."]
 
 
 def test_login_command_exits_on_runtime_error(runner, tty_mode, monkeypatch):
     errors = []
-    monkeypatch.setattr(auth_cmd, "do_login", lambda force=False, debug=False: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(auth_cmd, "do_login", lambda force=False, debug=False, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
     monkeypatch.setattr(auth_cmd, "print_error", lambda msg: errors.append(msg))
 
     result = runner.invoke(auth_cmd.login, [])
@@ -35,12 +35,14 @@ def test_login_command_exits_on_runtime_error(runner, tty_mode, monkeypatch):
 def test_whoami_outputs_json(runner, tty_mode, monkeypatch):
     fake_client = type("Client", (), {"get_me": lambda self: {"DisplayName": "Alice"}})()
     monkeypatch.setattr(auth_cmd, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(auth_cmd, "get_account_name", lambda account_name=None: "default")
 
     result = runner.invoke(auth_cmd.whoami, ["--json"])
 
     assert result.exit_code == 0
     payload = json.loads(result.output)
     assert payload["data"]["DisplayName"] == "Alice"
+    assert payload["data"]["AccountProfile"] == "default"
 
 
 def test_folders_command_can_export_json(runner, tty_mode, monkeypatch, make_folder, tmp_path):

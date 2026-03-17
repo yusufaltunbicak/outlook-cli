@@ -10,6 +10,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     cfg,
     console,
     print_calendars,
@@ -111,8 +112,9 @@ def _build_recurrence(
 @click.option("--calendar", "cal_name", default=None, help="Calendar name (default: your primary calendar)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--output", "-o", type=click.Path(), help="Save output to file")
+@account_option
 @_handle_api_error
-def calendar(days: int, cal_name: str | None, as_json: bool, output: str | None):
+def calendar(days: int, cal_name: str | None, as_json: bool, output: str | None, account_name: str | None):
     """Show upcoming calendar events."""
     client = _get_client()
     now = datetime.now(timezone.utc)
@@ -140,8 +142,9 @@ def calendar(days: int, cal_name: str | None, as_json: bool, output: str | None)
 @click.command()
 @click.argument("event_id")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def event(event_id: str, as_json: bool):
+def event(event_id: str, as_json: bool, account_name: str | None):
     """View event details by display number."""
     client = _get_client()
     ev = client.get_event(event_id)
@@ -169,6 +172,7 @@ def event(event_id: str, as_json: bool):
 @click.option("--repeat-days", default=None, help="Days of week for weekly (comma-separated: Monday,Wednesday,Friday)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
 def event_create(
     subject: str, start: str, end: str,
@@ -176,7 +180,7 @@ def event_create(
     is_html: bool, all_day: bool, reminder: int, teams: bool,
     repeat: str | None, repeat_interval: int, repeat_count: int | None,
     repeat_until: str | None, repeat_days: str | None,
-    as_json: bool, yes: bool,
+    as_json: bool, yes: bool, account_name: str | None,
 ):
     """Create a calendar event.
 
@@ -249,11 +253,12 @@ def event_create(
 @click.option("--add-attendee", multiple=True, help="Add attendee email (repeatable)")
 @click.option("--remove-attendee", multiple=True, help="Remove attendee email (repeatable)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
 def event_update(
     event_id: str, subject: str | None, start: str | None, end: str | None,
     location: str | None, body: str | None,
-    add_attendee: tuple, remove_attendee: tuple, as_json: bool,
+    add_attendee: tuple, remove_attendee: tuple, as_json: bool, account_name: str | None,
 ):
     """Update a calendar event."""
     client = _get_client()
@@ -292,8 +297,9 @@ def event_update(
 @click.argument("event_ids", nargs=-1, required=True)
 @click.option("--series", is_flag=True, help="Delete entire recurring series (uses SeriesMasterId)")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def event_delete(event_ids: tuple, series: bool, yes: bool):
+def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | None):
     """Delete calendar events. Accepts multiple IDs.
 
     For recurring events: deletes single occurrence by default.
@@ -327,8 +333,9 @@ def event_delete(event_ids: tuple, series: bool, yes: bool):
 @click.argument("event_id")
 @click.option("--days", default=90, type=int, help="Look-ahead days (default 90)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def event_instances(event_id: str, days: int, as_json: bool):
+def event_instances(event_id: str, days: int, as_json: bool, account_name: str | None):
     """List occurrences of a recurring event."""
     client = _get_client()
     now = datetime.now(timezone.utc)
@@ -353,8 +360,9 @@ def event_instances(event_id: str, days: int, as_json: bool):
 @click.argument("response", type=click.Choice(["accept", "decline", "tentative"]))
 @click.option("--comment", "-c", default="", help="Response comment")
 @click.option("--silent", is_flag=True, help="Don't send response to organizer")
+@account_option
 @_handle_api_error
-def event_respond(event_id: str, response: str, comment: str, silent: bool):
+def event_respond(event_id: str, response: str, comment: str, silent: bool, account_name: str | None):
     """Respond to a meeting invitation (accept/decline/tentative)."""
     response_map = {
         "accept": "accept",
@@ -371,8 +379,9 @@ def event_respond(event_id: str, response: str, comment: str, silent: bool):
 
 @click.command(name="calendars")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def calendars_cmd(as_json: bool):
+def calendars_cmd(as_json: bool, account_name: str | None):
     """List available calendars."""
     client = _get_client()
     cals = client.get_calendars()
@@ -392,8 +401,9 @@ def calendars_cmd(as_json: bool):
 @click.option("--end-hour", default=18, type=int, help="End hour (default 18)")
 @click.option("--duration", "-d", default=60, type=int, help="Meeting duration in minutes (default 60)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duration: int, as_json: bool):
+def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duration: int, as_json: bool, account_name: str | None):
     """Find available meeting times.
 
     ATTENDEES: comma-separated emails. DATE: YYYY-MM-DD, today, or tomorrow.
@@ -431,8 +441,9 @@ def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duratio
 @click.argument("query")
 @click.option("--max", "-n", "max_count", default=10, type=int, help="Max results")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def people_search(query: str, max_count: int, as_json: bool):
+def people_search(query: str, max_count: int, as_json: bool, account_name: str | None):
     """Search people by name for attendee autocomplete."""
     client = _get_client()
     results = client.search_people(query, top=max_count)

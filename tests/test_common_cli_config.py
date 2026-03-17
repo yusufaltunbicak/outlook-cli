@@ -16,8 +16,9 @@ from outlook_cli.exceptions import AuthRequiredError, ResourceNotFoundError, Tok
 
 
 class FakeOutlookClient:
-    def __init__(self, token: str):
+    def __init__(self, token: str, account_name: str | None = None):
         self.token = token
+        self.account_name = account_name
 
 
 def test_load_config_returns_defaults_when_file_missing(tmp_path):
@@ -77,6 +78,20 @@ def test_get_client_exits_when_auth_is_unavailable(monkeypatch):
     assert messages == ["login required"]
 
 
+def test_get_client_caches_per_account_profile(monkeypatch):
+    common._client_cache.clear()
+    monkeypatch.setattr(common, "get_token", lambda: "abc")
+    monkeypatch.setattr(common, "OutlookClient", FakeOutlookClient)
+    monkeypatch.setattr(common, "get_account_name", lambda account_name=None, allow_missing=False: account_name or "default")
+
+    work = common._get_client("work")
+    personal = common._get_client("personal")
+
+    assert work is not personal
+    assert work.account_name == "work"
+    assert personal.account_name == "personal"
+
+
 def test_wants_json_respects_explicit_flag(monkeypatch):
     monkeypatch.setattr(common, "_is_piped", lambda: False)
     assert common._wants_json(True) is True
@@ -89,10 +104,10 @@ def test_wants_json_respects_pipe(monkeypatch):
 
 
 def test_handle_api_error_retries_after_relogin(monkeypatch, runner, tty_mode):
-    common._client_cache = {"c": object()}
+    common._client_cache = {"default": object()}
     state = {"calls": 0}
     success_messages = []
-    monkeypatch.setattr(common, "do_login", lambda: "new-token")
+    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
     monkeypatch.setattr(common, "print_success", lambda msg: success_messages.append(msg))
 
     @click.command()
@@ -129,7 +144,7 @@ def test_handle_api_error_returns_json_envelope(monkeypatch, runner, tty_mode):
 
 
 def test_handle_api_error_reports_failed_relogin(monkeypatch, runner, tty_mode):
-    monkeypatch.setattr(common, "do_login", lambda: (_ for _ in ()).throw(RuntimeError("nope")))
+    monkeypatch.setattr(common, "do_login", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("nope")))
 
     @click.command()
     @click.option("--json", "as_json", is_flag=True)
@@ -148,6 +163,7 @@ def test_cli_registers_expected_commands():
     expected = {
         "login",
         "whoami",
+        "account",
         "inbox",
         "read",
         "thread",

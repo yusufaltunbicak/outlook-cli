@@ -7,6 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from outlook_cli import signature_manager as sm
+from outlook_cli.account import AccountPaths
 from outlook_cli.exceptions import ResourceNotFoundError
 
 
@@ -20,7 +21,9 @@ class _Resp:
 
 
 def test_list_signatures_returns_sorted_names(monkeypatch, tmp_path):
-    monkeypatch.setattr(sm, "SIGNATURES_DIR", tmp_path)
+    paths = AccountPaths("default", tmp_path, tmp_path, tmp_path / "token.json", tmp_path / "browser-state.json", tmp_path / "id_map.json", tmp_path / "scheduled.json", tmp_path, tmp_path / "config.yaml")
+    monkeypatch.setattr(sm.account_service, "resolve_account_name", lambda account_name=None: "default")
+    monkeypatch.setattr(sm.account_service, "get_account_paths", lambda account_name: paths)
     (tmp_path / "zeta.html").write_text("z")
     (tmp_path / "alpha.html").write_text("a")
 
@@ -28,7 +31,9 @@ def test_list_signatures_returns_sorted_names(monkeypatch, tmp_path):
 
 
 def test_get_save_and_delete_signature_roundtrip(monkeypatch, tmp_path):
-    monkeypatch.setattr(sm, "SIGNATURES_DIR", tmp_path)
+    paths = AccountPaths("default", tmp_path, tmp_path, tmp_path / "token.json", tmp_path / "browser-state.json", tmp_path / "id_map.json", tmp_path / "scheduled.json", tmp_path, tmp_path / "config.yaml")
+    monkeypatch.setattr(sm.account_service, "resolve_account_name", lambda account_name=None: "default")
+    monkeypatch.setattr(sm.account_service, "get_account_paths", lambda account_name: paths)
 
     path = sm.save_signature("default", "<b>sig</b>")
     assert path.read_text(encoding="utf-8") == "<b>sig</b>"
@@ -39,7 +44,9 @@ def test_get_save_and_delete_signature_roundtrip(monkeypatch, tmp_path):
 
 
 def test_get_signature_raises_for_missing_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(sm, "SIGNATURES_DIR", tmp_path)
+    paths = AccountPaths("default", tmp_path, tmp_path, tmp_path / "token.json", tmp_path / "browser-state.json", tmp_path / "id_map.json", tmp_path / "scheduled.json", tmp_path, tmp_path / "config.yaml")
+    monkeypatch.setattr(sm.account_service, "resolve_account_name", lambda account_name=None: "default")
+    monkeypatch.setattr(sm.account_service, "get_account_paths", lambda account_name: paths)
 
     with pytest.raises(ResourceNotFoundError):
         sm.get_signature("missing")

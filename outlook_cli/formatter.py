@@ -288,7 +288,10 @@ def print_categories(categories: list[dict]) -> None:
     console.print(table)
 
 
-def print_whoami(data: dict) -> None:
+def print_whoami(data: dict, account_name: str | None = None) -> None:
+    profile = account_name or data.get("AccountProfile")
+    if profile:
+        console.print(f"[bold]Account:[/bold] {profile}")
     console.print(f"[bold]Name:[/bold]  {data.get('DisplayName', 'N/A')}")
     console.print(f"[bold]Email:[/bold] {data.get('EmailAddress', 'N/A')}")
     console.print(f"[bold]Alias:[/bold] {data.get('Alias', 'N/A')}")

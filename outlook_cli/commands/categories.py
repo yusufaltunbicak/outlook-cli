@@ -8,6 +8,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     console,
     get_token,
     print_categories,
@@ -18,8 +19,9 @@ from ._common import (
 
 @click.command()
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def categories(as_json: bool):
+def categories(as_json: bool, account_name: str | None):
     """List master categories with unread/total counts."""
     client = _get_client()
     resp = client.get_master_categories()
@@ -37,8 +39,9 @@ def categories(as_json: bool):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.argument("category")
+@account_option
 @_handle_api_error
-def categorize(message_ids: tuple, category: str):
+def categorize(message_ids: tuple, category: str, account_name: str | None):
     """Add a category to messages. Accepts multiple IDs."""
     client = _get_client()
     for mid in message_ids:
@@ -49,8 +52,9 @@ def categorize(message_ids: tuple, category: str):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.argument("category")
+@account_option
 @_handle_api_error
-def uncategorize(message_ids: tuple, category: str):
+def uncategorize(message_ids: tuple, category: str, account_name: str | None):
     """Remove a category from messages. Accepts multiple IDs."""
     client = _get_client()
     for mid in message_ids:
@@ -65,8 +69,9 @@ def uncategorize(message_ids: tuple, category: str):
 @click.argument("old_name")
 @click.argument("new_name")
 @click.option("--no-propagate", is_flag=True, help="Only rename master category, skip updating messages")
+@account_option
 @_handle_api_error
-def category_rename(old_name: str, new_name: str, no_propagate: bool):
+def category_rename(old_name: str, new_name: str, no_propagate: bool, account_name: str | None):
     """Rename a master category and update all messages."""
     from ..category_manager import rename_category
 
@@ -85,8 +90,9 @@ def category_rename(old_name: str, new_name: str, no_propagate: bool):
 @click.option("--folder", default=None, help="Limit to a specific folder")
 @click.option("--max", "-n", "max_messages", type=int, default=None, help="Max messages to clear")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def category_clear(name: str, folder: str | None, max_messages: int | None, yes: bool):
+def category_clear(name: str, folder: str | None, max_messages: int | None, yes: bool, account_name: str | None):
     """Remove a category label from messages (does not delete master category)."""
     from ..category_manager import clear_category
 
@@ -107,8 +113,9 @@ def category_clear(name: str, folder: str | None, max_messages: int | None, yes:
 @click.argument("name")
 @click.option("--no-propagate", is_flag=True, help="Only delete master category, skip clearing messages")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def category_delete(name: str, no_propagate: bool, yes: bool):
+def category_delete(name: str, no_propagate: bool, yes: bool, account_name: str | None):
     """Delete a master category and remove it from all messages."""
     from ..category_manager import clear_category, delete_category
 
@@ -132,8 +139,9 @@ def category_delete(name: str, no_propagate: bool, yes: bool):
 @click.command("category-create")
 @click.argument("name")
 @click.option("--color", type=int, default=15, help="Color index (0-24)")
+@account_option
 @_handle_api_error
-def category_create(name: str, color: int):
+def category_create(name: str, color: int, account_name: str | None):
     """Create a new master category."""
     from ..category_manager import create_category
     token = get_token()

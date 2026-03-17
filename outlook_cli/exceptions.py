@@ -23,6 +23,10 @@ class AuthRequiredError(OutlookCliError):
     """No token available — user must run 'outlook login'."""
 
 
+class AccountError(OutlookCliError):
+    """Account profile resolution, binding, or switching failure."""
+
+
 def error_code_for_exception(exc: Exception) -> str:
     """Map exception to a structured error code string."""
     mapping = {
@@ -30,5 +34,6 @@ def error_code_for_exception(exc: Exception) -> str:
         RateLimitError: "rate_limited",
         ResourceNotFoundError: "not_found",
         AuthRequiredError: "not_authenticated",
+        AccountError: "account_error",
     }
     return mapping.get(type(exc), "unknown_error")

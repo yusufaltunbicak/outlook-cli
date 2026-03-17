@@ -18,11 +18,14 @@ CACHE_DIR = Path(os.environ.get("OUTLOOK_CLI_CACHE", Path.home() / ".cache" / "o
 TOKEN_FILE = CACHE_DIR / "token.json"
 BROWSER_STATE_FILE = CACHE_DIR / "browser-state.json"
 ID_MAP_FILE = CACHE_DIR / "id_map.json"
+ACCOUNTS_CACHE_DIR = CACHE_DIR / "accounts"
 
 # Config paths
 CONFIG_DIR = Path(os.environ.get("OUTLOOK_CLI_CONFIG", Path.home() / ".config" / "outlook-cli"))
 CONFIG_FILE = CONFIG_DIR / "config.yaml"
 SIGNATURES_DIR = CONFIG_DIR / "signatures"
+ACCOUNTS_FILE = CONFIG_DIR / "accounts.json"
+ACCOUNTS_CONFIG_DIR = CONFIG_DIR / "accounts"
 
 # Attachment size threshold: inline base64 for files under 3 MB,
 # upload session for larger files.

@@ -10,20 +10,27 @@ from pathlib import Path
 
 import httpx
 
-from .constants import BASE_URL, SIGNATURES_DIR
+from . import account as account_service
+from .constants import BASE_URL
 from .exceptions import ResourceNotFoundError
 
 
-def list_signatures() -> list[str]:
+def _signatures_dir(account_name: str | None = None) -> Path:
+    selected = account_service.resolve_account_name(account_name)
+    return account_service.get_account_paths(selected).signatures_dir
+
+
+def list_signatures(account_name: str | None = None) -> list[str]:
     """Return names of saved signatures (without .html extension)."""
-    if not SIGNATURES_DIR.exists():
+    signatures_dir = _signatures_dir(account_name)
+    if not signatures_dir.exists():
         return []
-    return sorted(p.stem for p in SIGNATURES_DIR.glob("*.html"))
+    return sorted(p.stem for p in signatures_dir.glob("*.html"))
 
 
-def get_signature(name: str) -> str:
+def get_signature(name: str, account_name: str | None = None) -> str:
     """Load a signature's HTML content by name."""
-    path = SIGNATURES_DIR / f"{name}.html"
+    path = _signatures_dir(account_name) / f"{name}.html"
     if not path.exists():
         raise ResourceNotFoundError(
             f"Signature '{name}' not found. Run 'outlook signature list' to see available signatures."
@@ -31,17 +38,18 @@ def get_signature(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def save_signature(name: str, html: str) -> Path:
+def save_signature(name: str, html: str, account_name: str | None = None) -> Path:
     """Save signature HTML to disk."""
-    SIGNATURES_DIR.mkdir(parents=True, exist_ok=True)
-    path = SIGNATURES_DIR / f"{name}.html"
+    signatures_dir = _signatures_dir(account_name)
+    signatures_dir.mkdir(parents=True, exist_ok=True)
+    path = signatures_dir / f"{name}.html"
     path.write_text(html, encoding="utf-8")
     return path
 
 
-def delete_signature(name: str) -> None:
+def delete_signature(name: str, account_name: str | None = None) -> None:
     """Delete a saved signature."""
-    path = SIGNATURES_DIR / f"{name}.html"
+    path = _signatures_dir(account_name) / f"{name}.html"
     if not path.exists():
         raise ResourceNotFoundError(f"Signature '{name}' not found.")
     path.unlink()

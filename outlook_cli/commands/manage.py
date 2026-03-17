@@ -7,14 +7,15 @@ from datetime import datetime, timedelta
 
 import click
 
-from ._common import _get_client, _handle_api_error, print_success
+from ._common import _get_client, _handle_api_error, account_option, print_success
 
 
 @click.command("mark-read")
 @click.argument("message_ids", nargs=-1, required=True)
 @click.option("--unread", is_flag=True, help="Mark as unread instead")
+@account_option
 @_handle_api_error
-def mark_read(message_ids: tuple, unread: bool):
+def mark_read(message_ids: tuple, unread: bool, account_name: str | None):
     """Mark messages as read (or unread with --unread). Accepts multiple IDs."""
     client = _get_client()
     status = "unread" if unread else "read"
@@ -26,8 +27,9 @@ def mark_read(message_ids: tuple, unread: bool):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.argument("destination")
+@account_option
 @_handle_api_error
-def move(message_ids: tuple, destination: str):
+def move(message_ids: tuple, destination: str, account_name: str | None):
     """Move messages to another folder. Accepts multiple IDs."""
     client = _get_client()
     for mid in message_ids:
@@ -38,8 +40,9 @@ def move(message_ids: tuple, destination: str):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.argument("destination")
+@account_option
 @_handle_api_error
-def copy(message_ids: tuple, destination: str):
+def copy(message_ids: tuple, destination: str, account_name: str | None):
     """Copy messages to another folder. Accepts multiple IDs."""
     client = _get_client()
     for mid in message_ids:
@@ -50,8 +53,9 @@ def copy(message_ids: tuple, destination: str):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def delete(message_ids: tuple, yes: bool):
+def delete(message_ids: tuple, yes: bool, account_name: str | None):
     """Delete messages. Accepts multiple IDs."""
     if not yes:
         ids_str = ", ".join(f"#{m}" for m in message_ids)
@@ -97,8 +101,9 @@ def _parse_due_date(s: str) -> str:
 @click.option("--due", default=None, help="Due date: today, tomorrow, +3d, or YYYY-MM-DD")
 @click.option("--complete", is_flag=True, help="Mark flag as complete")
 @click.option("--clear", is_flag=True, help="Remove flag")
+@account_option
 @_handle_api_error
-def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool):
+def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool, account_name: str | None):
     """Flag messages for follow-up. Accepts multiple IDs.
 
     \b
@@ -139,8 +144,9 @@ def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool):
 @click.command()
 @click.argument("message_ids", nargs=-1, required=True)
 @click.option("--unpin", is_flag=True, help="Unpin messages instead")
+@account_option
 @_handle_api_error
-def pin(message_ids: tuple, unpin: bool):
+def pin(message_ids: tuple, unpin: bool, account_name: str | None):
     """Pin or unpin messages. Pinned messages stay at the top of your inbox.
 
     \b

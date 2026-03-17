@@ -11,6 +11,7 @@ from ._common import (
     _get_client,
     _handle_api_error,
     _wants_json,
+    account_option,
     cfg,
     console,
     print_error,
@@ -106,8 +107,9 @@ def _print_schedule_entries(entries: list[dict]) -> None:
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool):
+def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
     """Schedule an email to be sent later.
 
     AT is the scheduled send time. Accepts:
@@ -159,8 +161,9 @@ def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple
 
 @click.command(name="schedule-list")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
 @_handle_api_error
-def schedule_list(as_json: bool):
+def schedule_list(as_json: bool, account_name: str | None):
     """List scheduled (pending) emails."""
     client = _get_client()
     entries = client.get_scheduled_list()
@@ -178,8 +181,9 @@ def schedule_list(as_json: bool):
 @click.command(name="schedule-cancel")
 @click.argument("index", type=int)
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def schedule_cancel(index: int, yes: bool):
+def schedule_cancel(index: int, yes: bool, account_name: str | None):
     """Cancel a scheduled email by its list number.
 
     For draft entries: deletes the draft from server (prevents sending).
@@ -210,8 +214,9 @@ def schedule_cancel(index: int, yes: bool):
 @click.argument("message_id")
 @click.argument("at")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
+@account_option
 @_handle_api_error
-def schedule_draft(message_id: str, at: str, yes: bool):
+def schedule_draft(message_id: str, at: str, yes: bool, account_name: str | None):
     """Schedule an existing draft to be sent later.
 
     AT is the scheduled send time. Accepts:

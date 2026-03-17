@@ -23,12 +23,60 @@ playwright install chromium
 outlook login          # opens browser, captures token automatically
 outlook login --force  # force re-login, ignore saved session
 outlook whoami         # verify current user
+
+outlook account add work
+outlook account add personal
+outlook account list
+outlook account current
+outlook account switch work
+outlook account remove personal -y
+outlook whoami --account personal
 ```
 
-Token is cached at `~/.cache/outlook-cli/token.json`. Auto re-login on 401.
-You can also set `OUTLOOK_TOKEN` env var directly.
+Every non-account command accepts `--account NAME` for one-off overrides.
+`outlook whoami` includes the active profile in both table and JSON output.
+
+Account selection precedence:
+1. `--account NAME`
+2. `OUTLOOK_ACCOUNT`
+3. persisted current account (`accounts.json`)
+4. implicit `default`
+
+Auto re-login is profile-aware. You can still set `OUTLOOK_TOKEN` directly, but for bound profiles it must match the mailbox already bound to that profile.
+
+### Account Storage
+
+Global roots:
+
+- Cache root: `~/.cache/outlook-cli/`
+- Config root: `~/.config/outlook-cli/`
+- Account registry: `~/.config/outlook-cli/accounts.json`
+
+Per-profile state lives under:
+
+- Cache: `~/.cache/outlook-cli/accounts/<profile>/`
+- Config: `~/.config/outlook-cli/accounts/<profile>/`
+
+Profile-scoped files:
+
+- `token.json`
+- `browser-state.json`
+- `id_map.json`
+- `scheduled.json`
+- `signatures/`
+- `config.yaml`
+
+Existing single-account installs continue to work through the implicit `default` profile and legacy paths until a per-profile `default/` directory exists.
 
 ## Usage
+
+Examples with an explicit profile:
+
+```sh
+outlook inbox --account work
+outlook send "a@example.com" "Subject" "Body" --account personal
+outlook schedule-list --account work
+```
 
 ### Inbox
 
@@ -151,7 +199,7 @@ outlook signature-show MySignature     # preview a signature
 outlook signature-delete MySignature   # delete a saved signature
 ```
 
-Signatures are saved as HTML in `~/.config/outlook-cli/signatures/`. Set a default in config:
+Signatures are saved per profile in `~/.config/outlook-cli/accounts/<profile>/signatures/`. Set a default in config:
 
 ```yaml
 default_signature: MySignature
@@ -278,15 +326,21 @@ All JSON output uses a structured envelope:
 
 This tool caches sensitive authentication data on your local machine:
 
-- **Bearer token** (`~/.cache/outlook-cli/token.json`) — grants full access to your mailbox, calendar, and contacts until it expires. Protect this file as you would a password.
-- **Browser session state** (`~/.cache/outlook-cli/browser-state.json`) — contains cookies and SSO state that can be used to obtain new tokens without re-authentication.
+- **Bearer token** (`~/.cache/outlook-cli/token.json` or `~/.cache/outlook-cli/accounts/<profile>/token.json`) — grants full access to that mailbox, calendar, and contacts until it expires. Protect this file as you would a password.
+- **Browser session state** (`~/.cache/outlook-cli/browser-state.json` or `~/.cache/outlook-cli/accounts/<profile>/browser-state.json`) — contains cookies and SSO state that can be used to obtain new tokens without re-authentication.
 
 Both files are created with `600` permissions (owner-only read/write) on Unix systems. Never share these files or commit them to version control.
 
-To revoke access, delete the cache directory:
+To revoke access for all profiles, delete the cache directory:
 
 ```sh
 rm -rf ~/.cache/outlook-cli/
+```
+
+To revoke access for a single named profile, delete its scoped cache directory:
+
+```sh
+rm -rf ~/.cache/outlook-cli/accounts/<profile>/
 ```
 
 ## Undocumented API Notice
@@ -307,6 +361,8 @@ browser:
   timeout: 120
 output_format: table
 ```
+
+Per-profile overrides are loaded from `~/.config/outlook-cli/accounts/<profile>/config.yaml` and are deep-merged on top of the global config.
 
 ## Development
 

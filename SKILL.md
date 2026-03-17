@@ -31,14 +31,34 @@ playwright install chromium
 ## Authentication
 
 - First run: `outlook login` opens Chromium, user logs in, bearer token is auto-captured from OWA requests.
-- Token cached at `~/.cache/outlook-cli/token.json` (auto-expires based on JWT exp).
-- Auto re-login on 401 via cached browser SSO state.
-- Or set `OUTLOOK_TOKEN` environment variable directly.
+- Named profiles are supported via `outlook account add|list|current|switch|remove`.
+- Tokens, browser state, ID maps, scheduled-send tracking, signatures, and per-profile config are isolated per account profile.
+- Profile-scoped cache lives under `~/.cache/outlook-cli/accounts/<profile>/`; config lives under `~/.config/outlook-cli/accounts/<profile>/`.
+- Existing single-account installs continue to work through the implicit `default` profile and legacy cache paths.
+- Auto re-login on 401 is profile-aware.
+- `OUTLOOK_TOKEN` is still supported, but if a profile is bound it must match that profile's mailbox.
 
 ```bash
 outlook login              # Interactive browser login
 outlook login --force      # Force re-login, ignore saved session
 outlook whoami             # Verify current user
+outlook account add work   # Create and bind a named profile
+outlook account list
+outlook account current
+outlook account switch work
+outlook whoami --account work
+```
+
+### Account Selection
+
+- Every non-account command accepts `--account NAME`.
+- Selection precedence is: `--account NAME` → `OUTLOOK_ACCOUNT` → persisted current account → implicit `default`.
+- `outlook whoami` shows the active profile in both human and JSON output.
+
+```bash
+outlook inbox --account work
+outlook calendar --account personal --days 3
+outlook schedule-list --account work
 ```
 
 ## Command Reference
@@ -165,6 +185,8 @@ outlook signature-show default               # Preview a signature
 outlook signature-delete old-sig             # Delete a signature
 outlook signature-delete old-sig -y          # Delete without confirmation
 ```
+
+Signatures are stored per profile in `~/.config/outlook-cli/accounts/<profile>/signatures/`.
 
 ### Scheduled Send
 
@@ -474,6 +496,7 @@ outlook schedule-list
 ## ID System
 
 Messages and events get short display numbers (#1, #2, #3...) mapped to real Outlook IDs. Numbers are assigned when listing and persist across commands. Messages and events share the same ID map (capped at 500 entries).
+The ID map is profile-local, so `#3` in one account is unrelated to `#3` in another.
 
 ```bash
 outlook inbox --max 5      # Shows #1-#5
@@ -487,6 +510,7 @@ outlook event-respond 42 accept
 ## Error Handling
 
 - Token expired → auto re-login attempted via cached SSO state.
+- `Account profile 'X' not found` → run `outlook account add X` first, or use `outlook account list`.
 - `Unknown message #N` → run `outlook inbox` or `outlook calendar` first to populate the ID map.
 - `Folder 'X' not found` → run `outlook folders` to see available folder names.
 - `Calendar 'X' not found` → run `outlook calendars` to see available calendar names.
@@ -497,6 +521,7 @@ outlook event-respond 42 accept
 
 - Token is cached with `chmod 600` (owner-only read/write).
 - Browser state saved for SSO — avoids repeated logins.
+- Tokens, browser state, signatures, scheduled-send tracking, and ID maps are scoped per account profile.
 - `send`, `reply`, `forward`, `draft-send`, `schedule`, `schedule-draft`, `event-create`, `event-delete`, `delete`, and `category-delete` ask for confirmation by default (use `-y` to skip).
 - `flag`, `pin`, `mark-read`, `categorize` do NOT require confirmation (safe, reversible operations).
 - Do not share or log bearer tokens — they grant full mailbox access.
