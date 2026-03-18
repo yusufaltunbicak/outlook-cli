@@ -153,7 +153,7 @@ def _build_recurrence(
 
 
 @click.command()
-@click.option("--days", default=7, type=int, help="Number of days to show")
+@click.option("--days", default=7, type=int, help="Number of days to show (negative for past)")
 @click.option("--calendar", "cal_name", default=None, help="Calendar name (default: your primary calendar)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--timezone", "tz_str", default=None, help="Timezone for output (default: system local). Examples: UTC, UTC+8, Asia/Shanghai")
@@ -161,18 +161,33 @@ def _build_recurrence(
 @account_option
 @_handle_api_error
 def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None, output: str | None, account_name: str | None):
-    """Show upcoming calendar events.
+    """Show calendar events (past or future).
 
     Datetimes are automatically converted to your system's local timezone.
     Use --timezone to override with a specific timezone.
+
+    Examples:
+      outlook calendar --days 7      # Next 7 days
+      outlook calendar --days -7     # Past 7 days
+      outlook calendar --days -30    # Past 30 days
     """
     tz = _parse_timezone(tz_str)
 
     client = _get_client()
     now = datetime.now(timezone.utc)
-    end = now + timedelta(days=days)
+
+    # Support negative days for past events
+    if days >= 0:
+        start = now
+        end = now + timedelta(days=days)
+        range_desc = f"next {days} days"
+    else:
+        start = now + timedelta(days=days)  # days is negative
+        end = now
+        range_desc = f"past {-days} days"
+
     events = client.get_calendar_view(
-        start=now.isoformat(),
+        start=start.isoformat(),
         end=end.isoformat(),
         calendar_name=cal_name,
     )
@@ -185,9 +200,9 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
             click.echo(to_json_envelope(events, timezone=tz))
     else:
         if not events:
-            print_success(f"No events in the next {days} days.")
+            print_success(f"No events in the {range_desc}.")
         else:
-            console.print(f"[bold cyan]Calendar ({days} days)[/bold cyan]")
+            console.print(f"[bold cyan]Calendar ({range_desc})[/bold cyan]")
             print_events(events)
 
 
