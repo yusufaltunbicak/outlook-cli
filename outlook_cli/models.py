@@ -221,8 +221,12 @@ class Contact:
 def _parse_dt(s: str) -> datetime:
     if not s:
         return datetime.min
-    # Outlook returns ISO 8601 with or without timezone
+    # Outlook API returns datetime without timezone suffix
+    # Assume UTC if no timezone info is present
     s = s.replace("Z", "+00:00")
+    if "+" not in s and s.count("T") == 1:
+        # No timezone info, assume UTC
+        s = s + "+00:00"
     try:
         return datetime.fromisoformat(s)
     except ValueError:
