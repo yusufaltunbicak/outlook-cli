@@ -170,25 +170,35 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
       outlook calendar --days 7      # Next 7 days
       outlook calendar --days -7     # Past 7 days
       outlook calendar --days -30    # Past 30 days
+
+    Note: Date ranges are calculated in local timezone, not UTC.
+    This means --days -1 will show events from yesterday 00:00 to today 00:00 (local time).
     """
     tz = _parse_timezone(tz_str)
 
-    client = _get_client()
-    now = datetime.now(timezone.utc)
+    # Use local timezone for date boundary calculations
+    import datetime as dt
+    now_local = dt.datetime.now().astimezone()
+    today_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
-    # Support negative days for past events
+    # Calculate date range in local timezone
     if days >= 0:
-        start = now
-        end = now + timedelta(days=days)
+        start = today_midnight
+        end = today_midnight + timedelta(days=days)
         range_desc = f"next {days} days"
     else:
-        start = now + timedelta(days=days)  # days is negative
-        end = now
+        start = today_midnight + timedelta(days=days)  # days is negative
+        end = today_midnight
         range_desc = f"past {-days} days"
 
+    # Convert to UTC for API
+    start_utc = start.astimezone(timezone.utc)
+    end_utc = end.astimezone(timezone.utc)
+
+    client = _get_client()
     events = client.get_calendar_view(
-        start=start.isoformat(),
-        end=end.isoformat(),
+        start=start_utc.isoformat(),
+        end=end_utc.isoformat(),
         calendar_name=cal_name,
     )
 
