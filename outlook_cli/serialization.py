@@ -2,37 +2,34 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 from .models import Attachment, Contact, Email, Event, Folder
 
 SCHEMA_VERSION = "1"
 
 
-# Get local timezone
-def _get_local_timezone():
-    """Get system local timezone."""
-    import datetime as dt
-    return dt.datetime.now(dt.timezone.utc).astimezone().tzinfo
-
-
 class _Encoder(json.JSONEncoder):
-    def __init__(self, *, local_tz=None, **kwargs):
-        super().__init__(**kwargs)
-        self._local_tz = local_tz
-
     def default(self, o):
         if isinstance(o, datetime):
-            if self._local_tz and o.tzinfo:
-                # Convert to local timezone
-                local_dt = o.astimezone(self._local_tz)
-                return {
-                    "utc": o.isoformat(),
-                    "local": local_dt.strftime("%Y-%m-%d %H:%M"),
-                    "local_iso": local_dt.isoformat(),
-                }
             return o.isoformat()
         return super().default(o)
+
+
+def _encoder_cls(tz=None):
+    """Create encoder class with optional timezone conversion."""
+    if tz is None:
+        return _Encoder
+
+    class _TzEncoder(json.JSONEncoder):
+        def default(self, o):
+            if isinstance(o, datetime):
+                if o.tzinfo:
+                    return o.astimezone(tz).isoformat()
+                return o.isoformat()
+            return super().default(o)
+
+    return _TzEncoder
 
 
 def _normalize(items):
@@ -49,29 +46,17 @@ def to_json(items: list | dict, pretty: bool = True) -> str:
     return json.dumps(_normalize(items), cls=_Encoder, indent=2 if pretty else None, ensure_ascii=False)
 
 
-def to_json_envelope(items: list | dict, pretty: bool = True, timezone=None) -> str:
+def to_json_envelope(items: list | dict, pretty: bool = True, tz=None) -> str:
     """Wrap data in {ok, schema_version, data} envelope for stdout.
 
-    Args:
-        items: Data to serialize
-        pretty: Pretty-print JSON (default True)
-        timezone: Target timezone (default: system local timezone)
+    When tz is provided, datetime values are converted to that timezone.
     """
-    if timezone is None:
-        timezone = _get_local_timezone()
-
-    class _LocalEncoder(_Encoder):
-        def __init__(self, **kwargs):
-            super().__init__(local_tz=timezone, **kwargs)
-
-    encoder_cls = _LocalEncoder
-
     envelope = {
         "ok": True,
         "schema_version": SCHEMA_VERSION,
         "data": _normalize(items),
     }
-    return json.dumps(envelope, cls=encoder_cls, indent=2 if pretty else None, ensure_ascii=False)
+    return json.dumps(envelope, cls=_encoder_cls(tz), indent=2 if pretty else None, ensure_ascii=False)
 
 
 def error_json(code: str, message: str) -> str:
@@ -84,22 +69,7 @@ def error_json(code: str, message: str) -> str:
     return json.dumps(envelope, indent=2, ensure_ascii=False)
 
 
-def save_json(items: list | dict, path: str, timezone=None) -> None:
-    """Save raw JSON to file (no envelope — file export is raw data).
-
-    Args:
-        items: Data to serialize
-        path: File path to write to
-        timezone: Target timezone (default: system local timezone)
-    """
-    if timezone is None:
-        timezone = _get_local_timezone()
-
-    class _LocalEncoder(_Encoder):
-        def __init__(self, **kwargs):
-            super().__init__(local_tz=timezone, **kwargs)
-
-    encoder_cls = _LocalEncoder
-
+def save_json(items: list | dict, path: str, tz=None) -> None:
+    """Save raw JSON to file (no envelope — file export is raw data)."""
     with open(path, "w") as f:
-        f.write(json.dumps(_normalize(items), cls=encoder_cls, indent=2, ensure_ascii=False))
+        f.write(json.dumps(_normalize(items), cls=_encoder_cls(tz), indent=2, ensure_ascii=False))

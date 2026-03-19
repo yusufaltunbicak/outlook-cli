@@ -54,15 +54,15 @@ def login(
     """
     # If token is provided directly, skip browser and validate it
     if token is not None:
-        # Validate token format (JWT should have 3 parts)
         parts = token.split(".")
         if len(parts) != 3:
             raise ValueError("Invalid token format. Expected JWT with 3 parts.")
-        # Verify token works
-        me = _get_me_for_token(token)
         selected = account_service.resolve_account_name(account_name, allow_missing=allow_create)
+        if not allow_create:
+            account_service.ensure_account_known(selected)
+        me = _get_me_for_token(token)
         account_service.assert_mailbox_matches(selected, me)
-        mailbox_info = account_service.mailbox_info_from_me(me)
+        mailbox_info = account_service.bind_account(selected, me)
         _save_token(token, selected, mailbox_info)
         return token
 

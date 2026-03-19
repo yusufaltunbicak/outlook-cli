@@ -29,22 +29,19 @@ def _parse_timezone(tz_str: str | None):
     """Parse timezone string to timezone object.
 
     Supports:
-      None          -> system local timezone
+      None          -> None (no conversion)
       UTC           -> UTC
       UTC+8, UTC-5  -> fixed offset
       Asia/Shanghai -> IANA timezone name
     """
     if tz_str is None:
-        # Return None to use system default
         return None
 
     tz_str = tz_str.strip()
 
-    # UTC
     if tz_str.upper() == "UTC":
         return timezone.utc
 
-    # UTC+8, UTC-5, etc.
     import re
     offset_match = re.match(r'^UTC([+-])(\d{1,2})(?::(\d{2}))?$', tz_str, re.IGNORECASE)
     if offset_match:
@@ -53,12 +50,10 @@ def _parse_timezone(tz_str: str | None):
         minutes = int(offset_match.group(3) or 0)
         return timezone(sign * timedelta(hours=hours, minutes=minutes))
 
-    # IANA timezone name (e.g., Asia/Shanghai)
     try:
         import zoneinfo
         return zoneinfo.ZoneInfo(tz_str)
     except (ImportError, AttributeError):
-        # Python < 3.9, fallback to dateutil
         try:
             from dateutil import tz
             return tz.gettz(tz_str)
@@ -68,6 +63,16 @@ def _parse_timezone(tz_str: str | None):
             )
     except Exception:
         raise click.BadParameter(f"Unknown timezone: {tz_str}")
+
+
+def _resolve_output_tz(tz_str: str | None):
+    """Resolve output timezone from --timezone flag or config.yaml."""
+    if tz_str is not None:
+        return _parse_timezone(tz_str)
+    config_tz = cfg.get("timezone", "UTC")
+    if config_tz and config_tz.upper() != "UTC":
+        return _parse_timezone(config_tz)
+    return None
 
 
 def _parse_event_time(s: str) -> str:
@@ -174,9 +179,8 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
     Note: Date ranges are calculated in local timezone, not UTC.
     This means --days -1 will show events from yesterday 00:00 to today 00:00 (local time).
     """
-    tz = _parse_timezone(tz_str)
+    tz = _resolve_output_tz(tz_str)
 
-    # Use local timezone for date boundary calculations
     import datetime as dt
     now_local = dt.datetime.now().astimezone()
     today_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -204,10 +208,10 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
 
     if _wants_json(as_json):
         if output:
-            save_json(events, output, timezone=tz)
+            save_json(events, output, tz=tz)
             print_success(f"Saved to {output}")
         else:
-            click.echo(to_json_envelope(events, timezone=tz))
+            click.echo(to_json_envelope(events, tz=tz))
     else:
         if not events:
             print_success(f"No events in the {range_desc}.")
@@ -224,11 +228,11 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
 @_handle_api_error
 def event(event_id: str, as_json: bool, tz_str: str | None, account_name: str | None):
     """View event details by display number."""
-    tz = _parse_timezone(tz_str)
+    tz = _resolve_output_tz(tz_str)
     client = _get_client()
     ev = client.get_event(event_id)
     if _wants_json(as_json):
-        click.echo(to_json_envelope(ev, timezone=tz))
+        click.echo(to_json_envelope(ev, tz=tz))
     else:
         print_event_detail(ev)
 
@@ -417,7 +421,7 @@ def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | 
 @_handle_api_error
 def event_instances(event_id: str, days: int, as_json: bool, tz_str: str | None, account_name: str | None):
     """List occurrences of a recurring event."""
-    tz = _parse_timezone(tz_str)
+    tz = _resolve_output_tz(tz_str)
     client = _get_client()
     now = datetime.now(timezone.utc)
     end = now + timedelta(days=days)
@@ -427,7 +431,7 @@ def event_instances(event_id: str, days: int, as_json: bool, tz_str: str | None,
         end=end.isoformat(),
     )
     if _wants_json(as_json):
-        click.echo(to_json_envelope(events, timezone=tz))
+        click.echo(to_json_envelope(events, tz=tz))
     else:
         if not events:
             print_success("No occurrences found.")
@@ -490,7 +494,7 @@ def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duratio
 
     ATTENDEES: comma-separated emails. DATE: YYYY-MM-DD, today, or tomorrow.
     """
-    tz = _parse_timezone(tz_str)
+    tz = _resolve_output_tz(tz_str)
     addr_list = [a.strip() for a in attendees.split(",")]
 
     if date.lower() == "today":
@@ -511,7 +515,7 @@ def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duratio
     )
 
     if _wants_json(as_json):
-        click.echo(to_json_envelope(suggestions, timezone=tz))
+        click.echo(to_json_envelope(suggestions, tz=tz))
     else:
         if not suggestions:
             print_error("No available meeting slots found.")

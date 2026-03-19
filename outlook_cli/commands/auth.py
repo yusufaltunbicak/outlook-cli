@@ -35,13 +35,13 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
         outlook login --with-token < token.txt   # Read from file
         echo $TOKEN | outlook login --with-token    # Read from pipe
     """
+    import sys
+
     try:
         login_kwargs = {"force": force, "debug": debug}
         if account_name:
             login_kwargs["account_name"] = account_name
         if with_token:
-            import sys
-
             token = sys.stdin.read().strip()
             if not token:
                 print_error("No token provided via stdin.")

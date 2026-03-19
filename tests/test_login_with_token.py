@@ -96,8 +96,10 @@ class TestWithTokenUnit:
         monkeypatch.setattr(auth_module, "_get_me_for_token", fake_get_me)
         monkeypatch.setattr(auth_module, "_save_token", fake_save_token)
         monkeypatch.setattr(account_service, "assert_mailbox_matches", lambda *a, **k: {})
+        monkeypatch.setattr(account_service, "bind_account", lambda *a, **k: {
+            "mailbox_id": "mailbox123", "email": "test@example.com", "display_name": "Test User",
+        })
 
-        # Test the login function directly
         result = auth_module.login(token=fake_token)
 
         assert result == fake_token
@@ -132,6 +134,9 @@ class TestWithTokenUnit:
         monkeypatch.setattr(auth_module, "_get_me_for_token", fake_get_me)
         monkeypatch.setattr(auth_module, "_save_token", lambda t, a, i: None)
         monkeypatch.setattr(account_service, "assert_mailbox_matches", lambda *a, **k: {})
+        monkeypatch.setattr(account_service, "bind_account", lambda *a, **k: {
+            "mailbox_id": "mailbox123", "email": "test@example.com", "display_name": "Test User",
+        })
 
         auth_module.login(token="valid.token.here")
 

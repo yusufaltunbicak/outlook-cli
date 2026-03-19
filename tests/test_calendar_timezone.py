@@ -98,14 +98,13 @@ class TestDateBoundaryLogic:
         """Test date boundary when timezone crosses UTC midnight."""
         # Edge case: User in UTC+8, time is 02:00 local = 18:00 UTC (previous day UTC)
         # This tests that we use local midnight, not UTC midnight
-
+        tz_plus_8 = timezone(timedelta(hours=8))
         mock_now = datetime(2026, 3, 19, 18, 0, tzinfo=timezone.utc)  # 18:00 UTC = 02:00 UTC+8 next day
 
-        import datetime as dt
-        now_local = mock_now.astimezone()
+        now_local = mock_now.astimezone(tz_plus_8)
         today_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # Verify today_midnight uses local date (2026-03-20), not UTC date (2026-03-19)
+        # In UTC+8, 18:00 UTC on 3/19 is 02:00 on 3/20
         assert today_midnight.strftime("%Y-%m-%d") == "2026-03-20"
         assert today_midnight.hour == 0
 
