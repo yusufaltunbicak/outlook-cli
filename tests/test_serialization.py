@@ -39,6 +39,26 @@ class TestToJsonEnvelope:
         assert len(result["data"]) == 2
         assert result["data"][1]["name"] == "Sent"
 
+    def test_envelope_normalizes_nested_dataclasses(self):
+        email = Email(
+            id="m1",
+            subject="Hello",
+            sender=EmailAddress(name="Alice", address="alice@example.com"),
+            to=[],
+            cc=[],
+            received=datetime(2026, 3, 15, 10, 0, tzinfo=timezone.utc),
+            preview="",
+            body="",
+            body_type="Text",
+            is_read=True,
+            has_attachments=False,
+            importance="Normal",
+            conversation_id="conv-1",
+        )
+
+        result = json.loads(to_json_envelope({"messages": [email]}))
+        assert result["data"]["messages"][0]["subject"] == "Hello"
+
 
 class TestErrorJson:
     def test_error_envelope_structure(self):

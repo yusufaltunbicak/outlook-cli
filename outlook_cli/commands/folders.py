@@ -11,6 +11,7 @@ from ._common import (
     account_option,
     cfg,
     console,
+    get_category_color_map,
     print_folders,
     print_inbox,
     print_success,
@@ -90,4 +91,4 @@ def folder(
             print_success(f"No messages found in '{name}'.")
         else:
             console.print(f"[bold cyan]Folder: {name}[/bold cyan]")
-            print_inbox(messages)
+            print_inbox(messages, category_colors=get_category_color_map(client, messages))

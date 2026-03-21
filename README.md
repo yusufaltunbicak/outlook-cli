@@ -4,6 +4,10 @@ Read, send, and manage Outlook 365 emails, calendar events, and contacts from th
 
 Uses OWA bearer token authentication via Playwright — no admin consent or API keys required.
 
+<p align="center">
+  <img src="assets/help.svg" alt="outlook --help" width="760">
+</p>
+
 > **Disclaimer**: This is an unofficial, community-driven project. It is **not affiliated with, endorsed by, or supported by Microsoft Corporation**. "Outlook" and "Microsoft 365" are trademarks of Microsoft Corporation.
 >
 > This tool accesses Microsoft Outlook services using intercepted browser tokens and, in some cases, undocumented internal APIs (OWA `service.svc`). **Use of this tool may violate [Microsoft's Terms of Service](https://www.microsoft.com/en-us/servicesagreement)** or your organization's acceptable use policies. The authors accept no responsibility for account suspensions, data loss, or other consequences arising from the use of this tool.
@@ -37,6 +41,10 @@ outlook whoami --account personal
 
 Every non-account command accepts `--account NAME` for one-off overrides.
 `outlook whoami` includes the active profile in both table and JSON output.
+
+<p align="center">
+  <img src="assets/accounts.svg" alt="outlook account list" width="760">
+</p>
 
 Account selection precedence:
 1. `--account NAME`
@@ -76,9 +84,21 @@ Examples with an explicit profile:
 
 ```sh
 outlook inbox --account work
+outlook summary --account work
 outlook send "a@example.com" "Subject" "Body" --account personal
 outlook schedule-list --account work
 ```
+
+### Summary
+
+```sh
+outlook summary
+outlook summary --json
+```
+
+<p align="center">
+  <img src="assets/summary.svg" alt="outlook summary" width="700">
+</p>
 
 ### Inbox
 
@@ -96,6 +116,10 @@ outlook inbox --no-category            # only uncategorized messages
 outlook inbox -n 50 --no-category      # find 50 uncategorized messages
 ```
 
+<p align="center">
+  <img src="assets/inbox.svg" alt="outlook inbox" width="760">
+</p>
+
 ### Read / Search / Thread
 
 ```sh
@@ -105,6 +129,14 @@ outlook thread 3               # full conversation thread for message #3
 outlook search "keyword"       # search messages
 outlook search "from:john" --max 10
 ```
+
+<p align="center">
+  <img src="assets/read.svg" alt="outlook read" width="760">
+</p>
+
+<p align="center">
+  <img src="assets/search.svg" alt="outlook search" width="760">
+</p>
 
 ### Send / Reply / Forward
 
@@ -237,6 +269,10 @@ outlook calendar --timezone Asia/Shanghai             # convert times to timezon
 outlook calendar --timezone UTC+8                     # fixed offset also works
 outlook calendar --calendar "John Smith"              # view a shared calendar
 ```
+
+<p align="center">
+  <img src="assets/calendar.svg" alt="outlook calendar" width="760">
+</p>
 
 ### Events
 
@@ -378,4 +414,5 @@ cd outlook-cli
 pip install -e ".[dev]"
 playwright install chromium
 pytest
+python screenshots/generate_demos.py
 ```

@@ -41,9 +41,23 @@ def test_print_event_detail_includes_online_and_recurrence(capsys, make_event):
 
 
 def test_print_categories_renders_category_counts(capsys):
-    formatter.print_categories([{"Category": "Finance", "UnreadCount": 2, "ItemCount": 10}])
+    formatter.print_categories([{"Category": "Finance", "Color": 7, "UnreadCount": 2, "ItemCount": 10}])
     captured = capsys.readouterr()
 
     assert "Finance" in captured.err
     assert "2" in captured.err
     assert "10" in captured.err
+
+
+def test_print_accounts_marks_current_profile(capsys):
+    formatter.print_accounts(
+        [
+            {"name": "default", "current": True, "bound": True, "email": "a@example.com", "display_name": "Alice"},
+            {"name": "work", "current": False, "bound": False, "email": None, "display_name": None},
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert "default" in captured.err
+    assert "work" in captured.err
+    assert "unbound" in captured.err

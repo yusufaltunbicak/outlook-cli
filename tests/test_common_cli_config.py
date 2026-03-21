@@ -55,8 +55,9 @@ def test_deep_merge_overrides_leaf_values():
 
 def test_get_client_caches_single_instance(monkeypatch):
     common._client_cache.clear()
-    monkeypatch.setattr(common, "get_token", lambda: "abc")
+    monkeypatch.setattr(common, "get_token", lambda *args, **kwargs: "abc")
     monkeypatch.setattr(common, "OutlookClient", FakeOutlookClient)
+    monkeypatch.setattr(common, "_check_token_expiry", lambda token, account_name: token)
 
     first = common._get_client()
     second = common._get_client()
@@ -68,7 +69,7 @@ def test_get_client_caches_single_instance(monkeypatch):
 def test_get_client_exits_when_auth_is_unavailable(monkeypatch):
     common._client_cache.clear()
     messages = []
-    monkeypatch.setattr(common, "get_token", lambda: (_ for _ in ()).throw(AuthRequiredError("login required")))
+    monkeypatch.setattr(common, "get_token", lambda *args, **kwargs: (_ for _ in ()).throw(AuthRequiredError("login required")))
     monkeypatch.setattr(common, "print_error", lambda msg: messages.append(msg))
 
     with pytest.raises(SystemExit) as exc:
@@ -80,9 +81,10 @@ def test_get_client_exits_when_auth_is_unavailable(monkeypatch):
 
 def test_get_client_caches_per_account_profile(monkeypatch):
     common._client_cache.clear()
-    monkeypatch.setattr(common, "get_token", lambda: "abc")
+    monkeypatch.setattr(common, "get_token", lambda *args, **kwargs: "abc")
     monkeypatch.setattr(common, "OutlookClient", FakeOutlookClient)
     monkeypatch.setattr(common, "get_account_name", lambda account_name=None, allow_missing=False: account_name or "default")
+    monkeypatch.setattr(common, "_check_token_expiry", lambda token, account_name: token)
 
     work = common._get_client("work")
     personal = common._get_client("personal")
@@ -90,6 +92,22 @@ def test_get_client_caches_per_account_profile(monkeypatch):
     assert work is not personal
     assert work.account_name == "work"
     assert personal.account_name == "personal"
+
+
+def test_get_client_refreshes_expiring_cached_client(monkeypatch):
+    common._client_cache.clear()
+    cached = FakeOutlookClient("old-token", account_name="default")
+    cached._token = "old-token"
+    common._client_cache["default"] = cached
+
+    monkeypatch.setattr(common, "OutlookClient", FakeOutlookClient)
+    monkeypatch.setattr(common.account_service, "touch_account", lambda name: None)
+    monkeypatch.setattr(common, "_check_token_expiry", lambda token, account_name: "new-token")
+
+    refreshed = common._get_client()
+
+    assert refreshed is not cached
+    assert refreshed.token == "new-token"
 
 
 def test_wants_json_respects_explicit_flag(monkeypatch):
@@ -178,6 +196,7 @@ def test_cli_registers_expected_commands():
         "schedule-cancel",
         "schedule-draft",
         "search",
+        "summary",
         "folders",
         "folder",
         "categories",
@@ -212,3 +231,18 @@ def test_cli_registers_expected_commands():
     }
 
     assert expected.issubset(set(cli_module.cli.commands))
+
+
+def test_cli_help_renders_banner(runner):
+    result = runner.invoke(cli_module.cli, ["--help"])
+
+    assert result.exit_code == 0
+    assert "Outlook 365 from your terminal" in result.output
+    assert "summary" in result.output
+
+
+def test_cli_without_args_shows_help(runner):
+    result = runner.invoke(cli_module.cli, [])
+
+    assert result.exit_code == 0
+    assert "Usage:" in result.output
