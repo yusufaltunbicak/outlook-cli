@@ -9,6 +9,7 @@ from ._common import (
     _handle_api_error,
     _wants_json,
     account_option,
+    get_category_color_map,
     print_error,
     print_inbox,
     save_json,
@@ -39,4 +40,4 @@ def search(query: str, max_count: int, as_json: bool, output: str | None, accoun
         if not messages:
             print_error("No results found.")
         else:
-            print_inbox(messages)
+            print_inbox(messages, category_colors=get_category_color_map(client, messages))

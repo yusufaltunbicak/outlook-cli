@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import time
 from collections.abc import MutableMapping
 from copy import deepcopy
 from typing import Iterator
@@ -10,12 +12,13 @@ from typing import Iterator
 import click
 
 from .. import account as account_service
-from ..auth import get_token as auth_get_token, login as auth_login, verify_token
+from ..auth import _decode_exp, get_token as auth_get_token, login as auth_login, verify_token
 from ..client import OutlookClient
 from ..exceptions import AccountError, AuthRequiredError, OutlookCliError, ResourceNotFoundError, TokenExpiredError, error_code_for_exception
 from ..formatter import (
     console,
     print_attachments,
+    print_accounts,
     print_calendars,
     print_categories,
     print_contacts,
@@ -28,6 +31,7 @@ from ..formatter import (
     print_inbox,
     print_meeting_suggestions,
     print_people,
+    print_summary_dashboard,
     print_success,
     print_whoami,
 )
@@ -127,14 +131,24 @@ def do_login(
 
 def _get_client(account_name: str | None = None) -> OutlookClient:
     selected = get_account_name(account_name)
-    if selected not in _client_cache:
-        try:
-            token = get_token()
-        except (AuthRequiredError, RuntimeError, AccountError) as exc:
-            print_error(str(exc))
-            sys.exit(1)
-        _client_cache[selected] = OutlookClient(token, account_name=selected)
-        account_service.touch_account(selected)
+    try:
+        client = _client_cache.get(selected)
+        if client is not None:
+            current_token = getattr(client, "_token", getattr(client, "token", ""))
+            refreshed = _check_token_expiry(current_token, selected)
+            if refreshed == current_token:
+                return client
+            _client_cache[selected] = OutlookClient(refreshed, account_name=selected)
+            account_service.touch_account(selected)
+            return _client_cache[selected]
+
+        token = _check_token_expiry(get_token(selected), selected)
+    except (AuthRequiredError, RuntimeError, AccountError, ValueError) as exc:
+        print_error(str(exc))
+        sys.exit(1)
+
+    _client_cache[selected] = OutlookClient(token, account_name=selected)
+    account_service.touch_account(selected)
     return _client_cache[selected]
 
 
@@ -195,3 +209,39 @@ def _handle_api_error(fn):
             sys.exit(1)
 
     return wrapper
+
+
+def _check_token_expiry(token: str, account_name: str, *, buffer_seconds: int = 300) -> str:
+    """Refresh cached/profile tokens that are about to expire."""
+    if time.time() <= _decode_exp(token) - buffer_seconds:
+        return token
+
+    env_token = os.environ.get("OUTLOOK_TOKEN")
+    if env_token and env_token == token:
+        return token
+
+    if _is_json_mode():
+        console.print("[yellow]Token expiring soon. Re-authenticating...[/yellow]")
+    else:
+        print_error("Token expiring soon. Re-authenticating...")
+
+    login_kwargs = {"account_name": account_name} if account_name != "default" or _ctx_account_name() else {}
+    _client_cache.pop(account_name, None)
+    return do_login(**login_kwargs)
+
+
+def get_category_color_map(client: OutlookClient, items: list | None = None) -> dict[str, int]:
+    """Best-effort lookup of category colors for inbox/search displays."""
+    if items is not None and not any(getattr(item, "categories", None) for item in items):
+        return {}
+    try:
+        resp = client.get_master_categories()
+    except Exception:
+        return {}
+
+    category_list = resp.get("Body", {}).get("CategoryDetailsList", [])
+    return {
+        (entry.get("Category") or entry.get("Name")): entry.get("Color", 15)
+        for entry in category_list
+        if (entry.get("Category") or entry.get("Name"))
+    }

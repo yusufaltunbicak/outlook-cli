@@ -6,18 +6,7 @@ import click
 
 from .. import account as account_service
 from ..exceptions import AccountError
-from ._common import _handle_api_error, _wants_json, console, do_login, print_success, to_json_envelope
-
-
-def _account_row_label(row: dict) -> str:
-    parts = [row["name"]]
-    if row.get("current"):
-        parts.append("[bold cyan](current)[/bold cyan]")
-    if row.get("legacy_default"):
-        parts.append("[dim](legacy)[/dim]")
-    if not row.get("bound"):
-        parts.append("[yellow](unbound)[/yellow]")
-    return " ".join(parts)
+from ._common import _handle_api_error, _wants_json, do_login, print_accounts, print_success, to_json_envelope
 
 
 @click.group()
@@ -55,11 +44,7 @@ def list_accounts(as_json: bool):
         print_success("No account profiles configured.")
         return
 
-    for row in rows:
-        console.print(f"  {_account_row_label(row)}")
-        email = row.get("email") or "N/A"
-        display = row.get("display_name") or "N/A"
-        console.print(f"    [dim]{display} <{email}>[/dim]")
+    print_accounts(rows)
 
 
 @account.command("switch")
@@ -96,10 +81,7 @@ def current_account(as_json: bool):
         click.echo(to_json_envelope(row))
         return
 
-    console.print(f"  {_account_row_label(row)}")
-    display = row.get("display_name") or "N/A"
-    email = row.get("email") or "N/A"
-    console.print(f"    [dim]{display} <{email}>[/dim]")
+    print_accounts([row])
 
 
 @account.command("remove")

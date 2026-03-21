@@ -17,14 +17,34 @@ from .commands import (
     schedule as schedule_mod,
     search as search_mod,
     signatures as signatures_mod,
+    summary as summary_mod,
 )
+from .formatter import console
+
+BANNER = r"""
+ ╔═╗┬ ┬┌┬┐┬  ┌─┐┌─┐┬┌─  ╔═╗╦  ╦
+ ║ ║│ │ │ │  │ ││ │├┴┐  ║  ║  ║
+ ╚═╝└─┘ ┴ ┴─┘└─┘└─┘┴ ┴  ╚═╝╩═╝╩
+"""
 
 
-@click.group()
+class OutlookGroup(click.Group):
+    """Custom group that shows the Outlook CLI banner in help output."""
+
+    def format_help(self, ctx, formatter):
+        console.print(f"[bold cyan]{BANNER}[/bold cyan]", highlight=False)
+        console.print("  [dim]Outlook 365 from your terminal[/dim]")
+        console.print()
+        super().format_help(ctx, formatter)
+
+
+@click.group(cls=OutlookGroup, invoke_without_command=True)
 @click.version_option(package_name="outlook365-cli")
-def cli():
+@click.pass_context
+def cli(ctx: click.Context):
     """Outlook 365 CLI - read, send, and manage emails from the terminal."""
-    pass
+    if ctx.invoked_subcommand is None and not ctx.resilient_parsing:
+        click.echo(ctx.get_help())
 
 
 # Auth
@@ -51,6 +71,7 @@ cli.add_command(schedule_mod.schedule_draft)
 
 # Search
 cli.add_command(search_mod.search)
+cli.add_command(summary_mod.summary)
 
 # Folders
 cli.add_command(folders_mod.folders)

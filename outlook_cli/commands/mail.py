@@ -13,6 +13,7 @@ from ._common import (
     account_option,
     cfg,
     console,
+    get_category_color_map,
     print_email,
     print_email_raw,
     print_inbox,
@@ -109,7 +110,7 @@ def inbox(
         if not messages:
             print_success("No messages found.")
         else:
-            print_inbox(messages)
+            print_inbox(messages, category_colors=get_category_color_map(client, messages))
 
 
 @click.command()

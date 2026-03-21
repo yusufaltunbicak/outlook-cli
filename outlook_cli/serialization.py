@@ -34,10 +34,14 @@ def _encoder_cls(tz=None):
 
 def _normalize(items):
     """Convert dataclasses / mixed lists to plain dicts."""
-    if isinstance(items, list):
-        return [asdict(i) if hasattr(i, "__dataclass_fields__") else i for i in items]
     if hasattr(items, "__dataclass_fields__"):
-        return asdict(items)
+        return _normalize(asdict(items))
+    if isinstance(items, list):
+        return [_normalize(i) for i in items]
+    if isinstance(items, tuple):
+        return [_normalize(i) for i in items]
+    if isinstance(items, dict):
+        return {key: _normalize(value) for key, value in items.items()}
     return items
 
 
