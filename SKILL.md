@@ -18,7 +18,7 @@ tags:
 
 # outlook-cli Skill
 
-Use this skill when the user wants to read, send, search, or manage Outlook 365 emails and calendar events from the terminal. Also supports file attachments, follow-up flags, message pinning, recurring events, shared calendars, free/busy scheduling, categories, contacts, and signatures.
+Use this skill when the user wants to read, send, search, or manage Outlook 365 emails and calendar events from the terminal. Also supports file attachments, follow-up flags, message pinning, opening items in browser, recurring events, shared calendars, free/busy scheduling, categories, contacts, and signatures.
 
 ## Prerequisites
 
@@ -124,6 +124,8 @@ outlook forward 3 "to@email.com" -y              # Skip confirmation
 outlook forward 3 "to@email.com" --comment "FYI"
 outlook forward 3 "to@email.com" -a extra.pdf    # Forward with additional attachment
 ```
+
+**Body formatting:** Plain text bodies automatically convert newlines to HTML `<br>` tags, so line breaks and paragraphs are preserved in Outlook. Use `--html` only when you need to send raw HTML markup (tables, bold, links, etc.). No special flag is needed for multi-line plain text.
 
 ### Drafts
 
@@ -245,6 +247,8 @@ outlook flag 3 --clear             # Remove flag
 outlook pin 3                     # Pin to top of inbox
 outlook pin 3 4 5                 # Pin multiple messages
 outlook pin 3 --unpin             # Unpin message
+outlook open 3                   # Open message or event in browser
+outlook open 3 --print-url       # Print the OWA URL instead of opening
 ```
 
 ### Attachments
@@ -497,6 +501,10 @@ outlook schedule-draft 42 "tomorrow 09:00"
 
 # Check scheduled emails
 outlook schedule-list
+
+# Open a message or event in the browser
+outlook open 3
+outlook open 42 --print-url
 ```
 
 ## ID System
