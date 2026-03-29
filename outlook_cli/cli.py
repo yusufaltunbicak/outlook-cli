@@ -14,6 +14,7 @@ from .commands import (
     folders as folders_mod,
     mail as mail_mod,
     manage as manage_mod,
+    open_item as open_item_mod,
     schedule as schedule_mod,
     search as search_mod,
     signatures as signatures_mod,
@@ -99,6 +100,7 @@ cli.add_command(manage_mod.copy)
 cli.add_command(manage_mod.delete)
 cli.add_command(manage_mod.flag)
 cli.add_command(manage_mod.pin)
+cli.add_command(open_item_mod.open_item)
 
 # Attachments
 cli.add_command(attachments_mod.attachments)

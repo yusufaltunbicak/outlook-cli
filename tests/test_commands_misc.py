@@ -6,7 +6,7 @@ import base64
 import json
 
 from outlook_cli import category_manager, signature_manager
-from outlook_cli.commands import attachments, auth as auth_cmd, categories, contacts, folders, manage, search, signatures
+from outlook_cli.commands import attachments, auth as auth_cmd, categories, contacts, folders, manage, open_item, search, signatures
 
 
 def test_login_command_reports_success(runner, tty_mode, monkeypatch):
@@ -229,3 +229,41 @@ def test_manage_commands_delegate_to_client(runner, tty_mode, monkeypatch):
     assert fake_client.deleted == ["1", "2"]
     assert fake_client.flagged == [("1", "flagged", "2026-03-20"), ("2", "flagged", "2026-03-20")]
     assert fake_client.pinned == [("1", False), ("2", False)]
+
+
+def test_open_command_opens_browser(runner, tty_mode, monkeypatch):
+    class FakeClient:
+        def get_open_target(self, item_id):
+            self.called = item_id
+            return ("message", "https://outlook.office365.com/owa/?ItemID=abc")
+
+    fake_client = FakeClient()
+    opened = []
+    messages = []
+    monkeypatch.setattr(open_item, "_get_client", lambda account_name=None: fake_client)
+    monkeypatch.setattr(open_item.webbrowser, "open", lambda url: opened.append(url) or True)
+    monkeypatch.setattr(open_item, "print_success", lambda msg: messages.append(msg))
+
+    result = runner.invoke(open_item.open_item, ["3"])
+
+    assert result.exit_code == 0
+    assert fake_client.called == "3"
+    assert opened == ["https://outlook.office365.com/owa/?ItemID=abc"]
+    assert messages == ["Opened message #3 in browser"]
+
+
+def test_open_command_can_print_url_without_opening_browser(runner, tty_mode, monkeypatch):
+    class FakeClient:
+        def get_open_target(self, item_id):
+            self.called = item_id
+            return ("event", "https://outlook.office365.com/owa/?itemid=evt")
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(open_item, "_get_client", lambda account_name=None: fake_client)
+    monkeypatch.setattr(open_item.webbrowser, "open", lambda url: (_ for _ in ()).throw(AssertionError("should not open browser")))
+
+    result = runner.invoke(open_item.open_item, ["42", "--print-url"])
+
+    assert result.exit_code == 0
+    assert fake_client.called == "42"
+    assert result.output.strip() == "https://outlook.office365.com/owa/?itemid=evt"

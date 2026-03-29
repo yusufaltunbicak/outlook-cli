@@ -13,6 +13,17 @@ from .constants import ATTACHMENT_SIZE_THRESHOLD, BASE_URL, DEFERRED_SEND_PROPER
 from .exceptions import RateLimitError, ResourceNotFoundError, TokenExpiredError
 from .models import Attachment, Contact, Email, Event, Folder
 
+import html as _html_mod
+
+
+def _plain_text_to_html(text: str) -> str:
+    """Convert plain text to basic HTML, preserving line breaks.
+
+    Escapes HTML special characters and replaces newlines with <br> tags.
+    """
+    escaped = _html_mod.escape(text)
+    return escaped.replace("\n", "<br>\n")
+
 
 def _build_query_params(
     unread_only: bool = False,
@@ -237,11 +248,12 @@ class OutlookClient:
         html: bool = False,
         send_at: str | None = None,
     ) -> None:
+        content = body if html else _plain_text_to_html(body)
         message: dict = {
             "Subject": subject,
             "Body": {
-                "ContentType": "HTML" if html else "Text",
-                "Content": body,
+                "ContentType": "HTML",
+                "Content": content,
             },
             "ToRecipients": [
                 {"EmailAddress": {"Address": addr}} for addr in to
@@ -266,11 +278,12 @@ class OutlookClient:
         cc: list[str] | None = None,
         html: bool = False,
     ) -> Email:
+        content = body if html else _plain_text_to_html(body)
         payload: dict = {
             "Subject": subject,
             "Body": {
-                "ContentType": "HTML" if html else "Text",
-                "Content": body,
+                "ContentType": "HTML",
+                "Content": content,
             },
             "ToRecipients": [
                 {"EmailAddress": {"Address": addr}} for addr in to
@@ -288,9 +301,10 @@ class OutlookClient:
         self._post(f"/messages/{real_id}/send")
 
     def reply(self, message_id: str, comment: str, reply_all: bool = False) -> None:
-        real_id = self._resolve_id(message_id)
-        action = "replyall" if reply_all else "reply"
-        self._post(f"/messages/{real_id}/{action}", json={"Comment": comment})
+        # Comment field only supports plain text; use draft flow to preserve
+        # line breaks by converting to HTML.
+        draft = self.create_reply_draft(message_id, comment=comment, reply_all=reply_all)
+        self.send_draft(draft.id)
 
     def create_reply_draft(
         self,
@@ -302,35 +316,32 @@ class OutlookClient:
         real_id = self._resolve_id(message_id)
         action = "createreplyall" if reply_all else "createreply"
 
-        if html and comment:
-            # createReply only supports plain-text Comment.
-            # Create empty draft first, then prepend HTML body before quoted reply.
+        if comment:
+            # createReply's Comment field only supports plain text and drops
+            # line breaks.  Always create an empty draft first, then prepend
+            # the user's body (converted to HTML when needed) before the
+            # quoted original message.
             data = self._post(f"/messages/{real_id}/{action}", json={})
             draft_id = data["Id"]
             original_body = data.get("Body", {}).get("Content", "")
-            # Insert user's HTML before the quoted original message
+            body_html = comment if html else _plain_text_to_html(comment)
             if "<body>" in original_body:
-                combined = original_body.replace("<body>", f"<body>{comment} ", 1)
+                combined = original_body.replace("<body>", f"<body>{body_html} ", 1)
             else:
-                combined = comment + original_body
+                combined = body_html + original_body
             data = self._patch(f"/messages/{draft_id}", json={
                 "Body": {"ContentType": "HTML", "Content": combined},
             })
         else:
-            payload = {}
-            if comment:
-                payload["Comment"] = comment
-            data = self._post(f"/messages/{real_id}/{action}", json=payload)
+            data = self._post(f"/messages/{real_id}/{action}", json={})
 
         return Email.from_api(data)
 
     def forward(self, message_id: str, to: list[str], comment: str = "") -> None:
-        real_id = self._resolve_id(message_id)
-        payload = {
-            "Comment": comment,
-            "ToRecipients": [{"EmailAddress": {"Address": addr}} for addr in to],
-        }
-        self._post(f"/messages/{real_id}/forward", json=payload)
+        # Comment field only supports plain text; use draft flow to preserve
+        # line breaks by converting to HTML.
+        draft = self.create_forward_draft(message_id, to, comment=comment)
+        self.send_draft(draft.id)
 
     def move_message(self, message_id: str, destination_folder: str) -> Email:
         real_id = self._resolve_id(message_id)
@@ -611,6 +622,23 @@ class OutlookClient:
         self._assign_display_nums(messages)
         return messages
 
+    def get_open_target(self, item_id: str) -> tuple[str, str]:
+        """Resolve a display number or real ID to an Outlook on the web URL."""
+        label = f"#{item_id}" if item_id.isdigit() else item_id
+        try:
+            real_id = self._resolve_id(item_id)
+        except ResourceNotFoundError as exc:
+            raise ResourceNotFoundError(
+                f"Unknown item {label}. Run 'outlook inbox', 'outlook search', or 'outlook calendar' first to populate the ID map."
+            ) from exc
+
+        for kind, path in (("message", "/messages"), ("event", "/events")):
+            link = self._try_get_web_link(path, real_id)
+            if link:
+                return kind, link
+
+        raise ResourceNotFoundError(f"Item {label} was not found as a message or event.")
+
     # ------------------------------------------------------------------
     # Folders
     # ------------------------------------------------------------------
@@ -710,9 +738,22 @@ class OutlookClient:
         payload: dict = {
             "ToRecipients": [{"EmailAddress": {"Address": addr}} for addr in to],
         }
-        if comment:
-            payload["Comment"] = comment
         data = self._post(f"/messages/{real_id}/createforward", json=payload)
+        draft_id = data["Id"]
+
+        if comment:
+            # Comment field only supports plain text; patch the draft body
+            # with HTML-converted content to preserve line breaks.
+            original_body = data.get("Body", {}).get("Content", "")
+            body_html = _plain_text_to_html(comment)
+            if "<body>" in original_body:
+                combined = original_body.replace("<body>", f"<body>{body_html} ", 1)
+            else:
+                combined = body_html + original_body
+            data = self._patch(f"/messages/{draft_id}", json={
+                "Body": {"ContentType": "HTML", "Content": combined},
+            })
+
         return Email.from_api(data)
 
     # ------------------------------------------------------------------
@@ -778,9 +819,10 @@ class OutlookClient:
         if location:
             payload["Location"] = {"DisplayName": location}
         if body:
+            content = body if html else _plain_text_to_html(body)
             payload["Body"] = {
-                "ContentType": "HTML" if html else "Text",
-                "Content": body,
+                "ContentType": "HTML",
+                "Content": content,
             }
         if reminder_minutes is not None:
             payload["IsReminderOn"] = True
@@ -826,9 +868,10 @@ class OutlookClient:
         if "location" in kwargs:
             payload["Location"] = {"DisplayName": kwargs["location"]}
         if "body" in kwargs:
+            body_content = kwargs["body"] if kwargs.get("html") else _plain_text_to_html(kwargs["body"])
             payload["Body"] = {
-                "ContentType": "HTML" if kwargs.get("html") else "Text",
-                "Content": kwargs["body"],
+                "ContentType": "HTML",
+                "Content": body_content,
             }
         if "is_all_day" in kwargs:
             payload["IsAllDay"] = kwargs["is_all_day"]
@@ -1053,6 +1096,16 @@ class OutlookClient:
             except (json.JSONDecodeError, OSError):
                 pass
         return {}
+
+    def _try_get_web_link(self, collection_path: str, real_id: str) -> str | None:
+        """Fetch the Outlook Web URL for a message or event, if it exists."""
+        try:
+            resp = self._get(f"{collection_path}/{real_id}", params={"$select": "WebLink"})
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                return None
+            raise
+        return resp.get("WebLink") or None
 
     def _save_id_map(self) -> None:
         self._paths.id_map_file.parent.mkdir(parents=True, exist_ok=True)

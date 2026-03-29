@@ -216,6 +216,7 @@ def test_cli_registers_expected_commands():
         "delete",
         "flag",
         "pin",
+        "open",
         "attachments",
         "calendar",
         "event",

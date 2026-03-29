@@ -126,8 +126,10 @@ outlook inbox -n 50 --no-category      # find 50 uncategorized messages
 outlook read 3                 # read message #3
 outlook read 3 --raw           # raw HTML body
 outlook thread 3               # full conversation thread for message #3
+outlook open 3                 # open message #3 in Outlook on the web
 outlook search "keyword"       # search messages
 outlook search "from:john" --max 10
+outlook open 42                # open event #42 in Outlook on the web
 ```
 
 <p align="center">
@@ -256,6 +258,8 @@ outlook flag 3 --clear           # remove flag
 outlook pin 3                    # pin to top of inbox
 outlook pin 3 4 5                # pin multiple
 outlook pin 3 --unpin            # unpin
+outlook open 3                   # open message or event in browser
+outlook open 3 --print-url       # print the OWA URL instead of opening it
 ```
 
 ### Calendar

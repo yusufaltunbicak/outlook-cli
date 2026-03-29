@@ -191,13 +191,19 @@ class TestAttachFiles:
 
 class TestCreateForwardDraft:
     def test_creates_forward_draft(self, client):
-        """Should POST to createforward with ToRecipients."""
-        mock_response = {
+        """Should POST to createforward, then PATCH with HTML body when comment given."""
+        post_response = {
+            "Id": "AAMk_forward_draft_long_id_string_for_testing_purposes_123",
+            "Subject": "Fwd: Original Subject",
+            "Body": {"ContentType": "HTML", "Content": "<html><body>original</body></html>"},
+        }
+        patch_response = {
             "Id": "AAMk_forward_draft_long_id_string_for_testing_purposes_123",
             "Subject": "Fwd: Original Subject",
         }
         client._id_map["10"] = "AAMk_original_msg_long_id_string_for_testing_purposes_here"
-        with patch.object(client, "_post", return_value=mock_response) as mock_post, \
+        with patch.object(client, "_post", return_value=post_response) as mock_post, \
+             patch.object(client, "_patch", return_value=patch_response) as mock_patch, \
              patch.object(client, "_save_id_map"):
             result = client.create_forward_draft("10", ["user@example.com"], comment="FYI")
 
@@ -205,7 +211,11 @@ class TestCreateForwardDraft:
         assert "createforward" in path_arg
         payload = mock_post.call_args[1]["json"]
         assert payload["ToRecipients"][0]["EmailAddress"]["Address"] == "user@example.com"
-        assert payload["Comment"] == "FYI"
+        # Comment is now applied via PATCH as HTML, not via Comment field
+        mock_patch.assert_called_once()
+        patch_payload = mock_patch.call_args[1]["json"]
+        assert patch_payload["Body"]["ContentType"] == "HTML"
+        assert "FYI" in patch_payload["Body"]["Content"]
         assert result.subject == "Fwd: Original Subject"
 
 

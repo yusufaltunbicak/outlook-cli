@@ -87,6 +87,48 @@ def test_resolve_id_raises_for_unknown_display_number(client):
         client._resolve_id("99")
 
 
+def test_get_open_target_prefers_message_link(client, monkeypatch):
+    client._id_map["3"] = "msg-id"
+    calls = []
+
+    def fake_get(path, params=None):
+        calls.append((path, params))
+        return {"WebLink": "https://outlook.office365.com/owa/?ItemID=msg-id"}
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    kind, url = client.get_open_target("3")
+
+    assert kind == "message"
+    assert url == "https://outlook.office365.com/owa/?ItemID=msg-id"
+    assert calls == [("/messages/msg-id", {"$select": "WebLink"})]
+
+
+def test_get_open_target_falls_back_to_event_link(client, monkeypatch):
+    client._id_map["42"] = "event-id"
+    request = httpx.Request("GET", "https://example.com")
+    not_found = httpx.Response(404, request=request)
+
+    def fake_get(path, params=None):
+        if path == "/messages/event-id":
+            raise httpx.HTTPStatusError("not found", request=request, response=not_found)
+        if path == "/events/event-id":
+            return {"WebLink": "https://outlook.office365.com/owa/?itemid=event-id"}
+        raise AssertionError(f"unexpected path: {path}")
+
+    monkeypatch.setattr(client, "_get", fake_get)
+
+    kind, url = client.get_open_target("42")
+
+    assert kind == "event"
+    assert url == "https://outlook.office365.com/owa/?itemid=event-id"
+
+
+def test_get_open_target_raises_generic_missing_item_error(client):
+    with pytest.raises(ResourceNotFoundError, match="Unknown item #99"):
+        client.get_open_target("99")
+
+
 def test_assign_display_nums_reuses_existing_and_evicts_old_entries(client, monkeypatch, make_email):
     client.MAX_ID_MAP_SIZE = 2
     client._id_map = {"1": "existing-id"}
@@ -387,3 +429,56 @@ def test_get_master_categories_calls_owa_action(client, monkeypatch):
     client.get_master_categories()
 
     assert owa.call_args.args[0] == "FindCategoryDetails"
+
+
+# ── Plain text to HTML auto-conversion ───────────────────
+
+
+def test_plain_text_to_html_preserves_line_breaks():
+    from outlook_cli.client import _plain_text_to_html
+
+    result = _plain_text_to_html("Hello\nWorld")
+    assert result == "Hello<br>\nWorld"
+
+
+def test_plain_text_to_html_escapes_html_chars():
+    from outlook_cli.client import _plain_text_to_html
+
+    result = _plain_text_to_html("A < B & C > D")
+    assert "&lt;" in result
+    assert "&amp;" in result
+    assert "&gt;" in result
+    assert "<br>" not in result  # no newlines = no <br>
+
+
+def test_send_mail_auto_converts_plain_text(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(client, "_post", lambda path, json=None: captured.update(json=json))
+
+    client.send_mail(to=["a@b.com"], subject="Test", body="Line1\nLine2", html=False)
+
+    body = captured["json"]["Message"]["Body"]
+    assert body["ContentType"] == "HTML"
+    assert "Line1<br>\nLine2" in body["Content"]
+
+
+def test_send_mail_passes_html_body_unchanged(client, monkeypatch):
+    captured = {}
+    monkeypatch.setattr(client, "_post", lambda path, json=None: captured.update(json=json))
+
+    client.send_mail(to=["a@b.com"], subject="Test", body="<b>Bold</b>", html=True)
+
+    body = captured["json"]["Message"]["Body"]
+    assert body["ContentType"] == "HTML"
+    assert body["Content"] == "<b>Bold</b>"
+
+
+def test_create_draft_auto_converts_plain_text(client, monkeypatch):
+    monkeypatch.setattr(
+        client, "_post", lambda path, json=None: {"Id": "d1", "Subject": "S"}
+    )
+    monkeypatch.setattr(client, "_save_id_map", lambda: None)
+
+    email = client.create_draft(to=["a@b.com"], subject="S", body="A\nB", html=False)
+
+    assert email.id == "d1"
