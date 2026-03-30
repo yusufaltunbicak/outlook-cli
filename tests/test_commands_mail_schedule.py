@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from unittest.mock import MagicMock
 
+from outlook_cli import cli as cli_module
 from outlook_cli.commands import mail, schedule
 from outlook_cli import signature_manager
 
@@ -48,6 +49,25 @@ def test_send_without_attachments_calls_send_mail(runner, tty_mode, monkeypatch)
         to=["a@example.com", "b@example.com"],
         subject="Subject",
         body="Body",
+        cc=None,
+        html=False,
+    )
+
+
+def test_send_reads_body_from_file(runner, tty_mode, monkeypatch, tmp_path):
+    body_file = tmp_path / "body.txt"
+    body_file.write_text("Body from file")
+    fake_client = MagicMock()
+    monkeypatch.setattr(mail, "_get_client", lambda: fake_client)
+    monkeypatch.setitem(mail.cfg, "default_signature", None)
+
+    result = runner.invoke(mail.send, ["a@example.com", "Subject", "--body-file", str(body_file), "-y"])
+
+    assert result.exit_code == 0
+    fake_client.send_mail.assert_called_once_with(
+        to=["a@example.com"],
+        subject="Subject",
+        body="Body from file",
         cc=None,
         html=False,
     )
@@ -107,6 +127,16 @@ def test_reply_with_attachments_uses_reply_draft_flow(runner, tty_mode, monkeypa
     fake_client.send_draft.assert_called_once_with("reply-draft")
 
 
+def test_reply_reads_body_from_stdin(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(mail, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(mail.reply, ["3", "--body-file", "-", "-y"], input="Thanks from stdin")
+
+    assert result.exit_code == 0
+    fake_client.reply.assert_called_once_with("3", "Thanks from stdin", reply_all=False)
+
+
 def test_reply_draft_outputs_json(runner, tty_mode, monkeypatch, make_email):
     fake_client = MagicMock()
     fake_client.create_reply_draft.return_value = make_email(id="reply-draft", subject="Re: Topic")
@@ -160,6 +190,41 @@ def test_schedule_with_attachments_uses_draft_schedule_flow(runner, tty_mode, mo
     fake_client.create_draft.assert_called_once()
     fake_client.attach_files.assert_called_once_with("draft-3", [str(attachment)])
     assert fake_client.schedule_draft.call_count == 1
+
+
+def test_send_rejects_body_and_body_file_together(runner, tty_mode, monkeypatch, tmp_path):
+    body_file = tmp_path / "body.txt"
+    body_file.write_text("Body from file")
+    fake_client = MagicMock()
+    monkeypatch.setattr(mail, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(mail.send, ["a@example.com", "Subject", "Body", "--body-file", str(body_file), "-y"])
+
+    assert result.exit_code == 2
+    assert "Use either BODY or --body-file, not both." in result.output
+    fake_client.send_mail.assert_not_called()
+
+
+def test_schedule_reads_body_from_stdin_in_dry_run_json(runner, monkeypatch):
+    result = runner.invoke(
+        cli_module.cli,
+        [
+            "schedule",
+            "a@example.com",
+            "Subject",
+            "+30m",
+            "--body-file",
+            "-",
+            "--dry-run",
+            "--json",
+        ],
+        input="Scheduled from stdin",
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["data"]["dry_run"] is True
+    assert payload["data"]["request"]["body"] == "Scheduled from stdin"
 
 
 def test_schedule_list_outputs_json(runner, tty_mode, monkeypatch):

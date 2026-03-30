@@ -18,6 +18,7 @@ from ._common import (
     maybe_dry_run,
     print_error,
     print_success,
+    resolve_body_input,
     to_json_envelope,
 )
 from .mail import _show_attachment_info
@@ -101,23 +102,32 @@ def _print_schedule_entries(entries: list[dict]) -> None:
 @click.command()
 @click.argument("to")
 @click.argument("subject")
-@click.argument("body")
-@click.argument("at")
+@click.argument("body", required=False)
+@click.argument("at", required=False)
 @click.option("--cc", multiple=True, help="CC recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
+@click.option("--body-file", type=click.Path(exists=True, dir_okay=False, allow_dash=True), help="Read body from file ('-' for stdin)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation")
 @account_option
 @_handle_api_error
-def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
+def schedule(to: str, subject: str, body: str | None, at: str | None, cc: tuple, attach: tuple, body_file: str | None, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
     """Schedule an email to be sent later.
 
     AT is the scheduled send time. Accepts:
     +30m, +1h, +2h30m (relative), tomorrow 09:00, 2024-03-15T10:00
     """
     from ..signature_manager import append_signature, get_signature
+
+    if body_file and at is None and body is not None:
+        at, body = body, None
+    if at is None:
+        raise click.UsageError("Provide AT.")
+    body = resolve_body_input(body, body_file)
+    if not body:
+        raise click.UsageError("Provide BODY or --body-file.")
 
     send_at = _parse_schedule_time(at)
 

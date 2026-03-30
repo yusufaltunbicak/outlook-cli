@@ -160,16 +160,20 @@ All send commands show a confirmation prompt before sending. Use `-y` to skip.
 
 ```sh
 outlook send "to@email.com" "Subject" "Body"
+outlook send "to@email.com" "Subject" --body-file message.txt
+printf 'Body from stdin' | outlook send "to@email.com" "Subject" --body-file -
 outlook send "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com -y
 outlook send "to@email.com" "Subject" "Body" --signature MySignature
 outlook send "to@email.com" "Subject" "<h1>HTML</h1>" --html -s MySignature
 outlook send "to@email.com" "Report" "See attached" -a report.pdf
 outlook send "to@email.com" "Files" "Here" -a file1.pdf -a file2.xlsx
 outlook reply 3 "Thanks!"
+printf 'Thanks from stdin' | outlook reply 3 --body-file -
 outlook reply 3 "Thanks!" --all
 outlook reply 3 "Here it is" --attach requested-file.pdf
 outlook reply-draft 3                          # create reply draft without sending
 outlook reply-draft 3 "Will check" --all       # reply-all draft with body
+outlook reply-draft 3 --body-file reply.html --html
 outlook reply-draft 3 "<p>HTML</p>" --html     # HTML body (preserves quoted original)
 outlook reply-draft 3 "Body" -s MySignature    # reply draft with signature
 outlook forward 3 "to@email.com" --comment "FYI"
@@ -180,6 +184,7 @@ outlook forward 3 "to@email.com" -a extra-doc.pdf
 
 ```sh
 outlook draft "to@email.com" "Subject" "Body"              # create draft
+outlook draft "to@email.com" "Subject" --body-file draft.txt
 outlook draft "to@email.com" "Subject" "Body" --cc e@f.com # draft with CC
 outlook draft "to@email.com" "Subject" "Body" -a file.pdf  # draft with attachment
 outlook draft "to@email.com" "Subject" "Body" -s MySignature # draft with signature
@@ -191,6 +196,7 @@ outlook draft-send 3 -y                                     # send without confi
 
 ```sh
 outlook schedule "to@email.com" "Subject" "Body" "+1h"        # send in 1 hour
+printf 'Scheduled body' | outlook schedule "to@email.com" "Subject" "+1h" --body-file -
 outlook schedule "to@email.com" "Subject" "Body" "+30m" -y    # 30 min, skip confirm
 outlook schedule "to@email.com" "Subject" "Body" "tomorrow 09:00"
 outlook schedule "to@email.com" "Subject" "Body" "2026-03-15T10:00"

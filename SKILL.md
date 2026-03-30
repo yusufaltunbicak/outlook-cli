@@ -114,6 +114,8 @@ outlook thread 3 --json    # JSON output
 
 ```bash
 outlook send "to@email.com" "Subject" "Body"                     # Shows confirmation prompt
+outlook send "to@email.com" "Subject" --body-file message.txt
+printf 'Body from stdin' | outlook send "to@email.com" "Subject" --body-file -
 outlook send "to@email.com" "Subject" "Body" -y                  # Skip confirmation
 outlook send "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com
 outlook send "to@email.com" "Subject" "<h1>Hi</h1>" --html
@@ -122,11 +124,13 @@ outlook send "to@email.com" "Report" "See attached" -a report.pdf         # With
 outlook send "to@email.com" "Files" "Here" -a file1.pdf -a file2.xlsx     # Multiple attachments
 
 outlook reply 3 "Thanks!"                       # Shows confirmation prompt
+printf 'Thanks from stdin' | outlook reply 3 --body-file -
 outlook reply 3 "Thanks!" -y                    # Skip confirmation
 outlook reply 3 "Noted, will fix." --all         # Reply all
 outlook reply 3 "Here it is" -a requested.pdf    # Reply with attachment
 outlook reply-draft 3                            # Create reply draft (empty body, edit in Outlook)
 outlook reply-draft 3 "Will review tomorrow"     # Create reply draft with body
+outlook reply-draft 3 --body-file reply.html --html
 outlook reply-draft 3 "<p>HTML reply</p>" --html # HTML body (preserves quoted original)
 outlook reply-draft 3 "Noted" --all              # Reply-all draft
 outlook reply-draft 3 "Body" --signature default # Reply draft with signature
@@ -144,6 +148,7 @@ outlook forward 3 "to@email.com" -a extra.pdf    # Forward with additional attac
 
 ```bash
 outlook draft "to@email.com" "Subject" "Body"                    # Create draft
+outlook draft "to@email.com" "Subject" --body-file draft.txt
 outlook draft "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com   # Draft with CC
 outlook draft "to@email.com" "Subject" "<h1>Hi</h1>" --html     # HTML draft
 outlook draft "to@email.com" "Subject" "Body" -a doc.pdf         # Draft with attachment
@@ -209,6 +214,7 @@ Signatures are stored per profile in `~/.config/outlook-cli/accounts/<profile>/s
 
 ```bash
 outlook schedule "to@email.com" "Subject" "Body" "+1h"              # Schedule 1 hour from now
+printf 'Scheduled body' | outlook schedule "to@email.com" "Subject" "+1h" --body-file -
 outlook schedule "to@email.com" "Subject" "Body" "+30m" -y          # Schedule 30 min, skip confirm
 outlook schedule "to@email.com" "Subject" "Body" "tomorrow 09:00"   # Schedule for tomorrow
 outlook schedule "to@email.com" "Subject" "Body" "2026-03-15T10:00" # Exact datetime

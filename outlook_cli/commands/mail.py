@@ -20,6 +20,7 @@ from ._common import (
     print_email_raw,
     print_inbox,
     print_success,
+    resolve_body_input,
     save_json,
     to_json_envelope,
 )
@@ -167,18 +168,23 @@ def thread(message_id: str, as_json: bool, account_name: str | None):
 @click.command()
 @click.argument("to")
 @click.argument("subject")
-@click.argument("body")
+@click.argument("body", required=False)
 @click.option("--cc", multiple=True, help="CC recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
+@click.option("--body-file", type=click.Path(exists=True, dir_okay=False, allow_dash=True), help="Read body from file ('-' for stdin)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
 @account_option
 @_handle_api_error
-def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
+def send(to: str, subject: str, body: str | None, cc: tuple, attach: tuple, body_file: str | None, is_html: bool, sig_name: str | None, as_json: bool, yes: bool, account_name: str | None):
     """Send an email. TO can be comma-separated for multiple recipients."""
     from ..signature_manager import append_signature, get_signature
+
+    body = resolve_body_input(body, body_file)
+    if not body:
+        raise click.UsageError("Provide BODY or --body-file.")
 
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name:
@@ -227,17 +233,22 @@ def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bo
 @click.command()
 @click.argument("to")
 @click.argument("subject")
-@click.argument("body")
+@click.argument("body", required=False)
 @click.option("--cc", multiple=True, help="CC recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
+@click.option("--body-file", type=click.Path(exists=True, dir_okay=False, allow_dash=True), help="Read body from file ('-' for stdin)")
 @click.option("--html", "is_html", is_flag=True, help="Send body as HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @account_option
 @_handle_api_error
-def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
+def draft(to: str, subject: str, body: str | None, cc: tuple, attach: tuple, body_file: str | None, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
     """Create a draft email without sending. TO can be comma-separated."""
     from ..signature_manager import append_signature, get_signature
+
+    body = resolve_body_input(body, body_file)
+    if not body:
+        raise click.UsageError("Provide BODY or --body-file.")
 
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name:
@@ -291,14 +302,18 @@ def draft_send(message_id: str, yes: bool, account_name: str | None):
 
 @click.command()
 @click.argument("message_id")
-@click.argument("body")
+@click.argument("body", required=False)
 @click.option("--all", "reply_all", is_flag=True, help="Reply to all recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
+@click.option("--body-file", type=click.Path(exists=True, dir_okay=False, allow_dash=True), help="Read body from file ('-' for stdin)")
 @click.option("--yes", "-y", is_flag=True, help="Skip send confirmation")
 @account_option
 @_handle_api_error
-def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool, account_name: str | None):
+def reply(message_id: str, body: str | None, reply_all: bool, attach: tuple, body_file: str | None, yes: bool, account_name: str | None):
     """Reply to an email."""
+    body = resolve_body_input(body, body_file)
+    if not body:
+        raise click.UsageError("Provide BODY or --body-file.")
     maybe_dry_run(
         "reply",
         {
@@ -330,17 +345,20 @@ def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool,
 
 @click.command(name="reply-draft")
 @click.argument("message_id")
-@click.argument("body", default="")
+@click.argument("body", required=False)
 @click.option("--all", "reply_all", is_flag=True, help="Reply to all recipients")
 @click.option("--attach", "-a", multiple=True, type=click.Path(exists=True), help="Attach a file (repeatable)")
+@click.option("--body-file", type=click.Path(exists=True, dir_okay=False, allow_dash=True), help="Read body from file ('-' for stdin)")
 @click.option("--html", "is_html", is_flag=True, help="Body is HTML")
 @click.option("--signature", "-s", "sig_name", default=None, help="Append a saved signature")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @account_option
 @_handle_api_error
-def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
+def reply_draft(message_id: str, body: str | None, reply_all: bool, attach: tuple, body_file: str | None, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
     """Create a reply draft without sending."""
     from ..signature_manager import append_signature, get_signature
+
+    body = resolve_body_input(body, body_file)
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name and body:
         sig_html = get_signature(sig_name)

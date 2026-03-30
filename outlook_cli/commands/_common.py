@@ -7,6 +7,7 @@ import sys
 import time
 from collections.abc import MutableMapping
 from copy import deepcopy
+from pathlib import Path
 from typing import Iterator
 
 import click
@@ -159,6 +160,17 @@ def maybe_dry_run(op: str, request: dict | None = None) -> None:
             click.echo(to_json(request))
 
     raise click.exceptions.Exit(0)
+
+
+def resolve_body_input(body: str | None, body_file: str | None) -> str:
+    """Resolve compose body from a positional arg or --body-file."""
+    if not body_file:
+        return body or ""
+    if body not in (None, ""):
+        raise click.UsageError("Use either BODY or --body-file, not both.")
+    if body_file == "-":
+        return sys.stdin.read()
+    return Path(body_file).read_text()
 
 
 def _ctx_account_name() -> str | None:
