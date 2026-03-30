@@ -11,8 +11,10 @@ from ._common import (
     _handle_api_error,
     _wants_json,
     account_option,
+    confirm_action,
     cfg,
     console,
+    maybe_dry_run,
     print_calendars,
     print_error,
     print_event_detail,
@@ -286,6 +288,22 @@ def event_create(
             count=repeat_count, until=repeat_until, days=repeat_days,
         )
 
+    maybe_dry_run(
+        "event-create",
+        {
+            "subject": subject,
+            "start": start_dt,
+            "end": end_dt,
+            "attendees": attendees,
+            "location": location,
+            "body": body,
+            "html": is_html,
+            "all_day": all_day,
+            "reminder_minutes": reminder,
+            "teams": teams,
+            "recurrence": recurrence,
+        },
+    )
     if not yes:
         console.print(f"  [bold]Subject:[/bold] {subject}")
         console.print(f"  [bold]Start:[/bold] {start_dt}")
@@ -302,7 +320,7 @@ def event_create(
                 console.print(f"  [bold]Occurrences:[/bold] {rng['NumberOfOccurrences']}")
             elif rng["Type"] == "EndDate":
                 console.print(f"  [bold]Until:[/bold] {rng['EndDate']}")
-        click.confirm("Create this event?", abort=True)
+        confirm_action("Create this event?", action="create this event")
 
     client = _get_client()
     ev = client.create_event(
@@ -388,6 +406,10 @@ def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | 
     For recurring events: deletes single occurrence by default.
     Use --series to delete the entire series.
     """
+    maybe_dry_run(
+        "event-delete",
+        {"event_ids": list(event_ids), "series": series},
+    )
     client = _get_client()
     for eid in event_ids:
         if series:
@@ -402,12 +424,12 @@ def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | 
                 target_id = ev.id
                 label = f"event #{eid} (not a recurring event)"
             if not yes:
-                click.confirm(f"Delete {label}?", abort=True)
+                confirm_action(f"Delete {label}?", action=f"delete {label}")
             client._delete(f"/events/{target_id}")
             print_success(f"Deleted {label}")
         else:
             if not yes:
-                click.confirm(f"Delete event #{eid}?", abort=True)
+                confirm_action(f"Delete event #{eid}?", action=f"delete event #{eid}")
             client.delete_event(eid)
             print_success(f"Event #{eid} deleted")
 

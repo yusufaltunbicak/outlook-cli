@@ -11,9 +11,11 @@ from ._common import (
     _handle_api_error,
     _wants_json,
     account_option,
+    confirm_action,
     cfg,
     console,
     get_category_color_map,
+    maybe_dry_run,
     print_email,
     print_email_raw,
     print_inbox,
@@ -185,6 +187,17 @@ def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bo
 
     to_list = [addr.strip() for addr in to.split(",")]
     cc_list = list(cc) if cc else None
+    maybe_dry_run(
+        "send",
+        {
+            "to": to_list,
+            "subject": subject,
+            "body": body,
+            "cc": cc_list,
+            "attach": list(attach),
+            "html": is_html,
+        },
+    )
 
     if not yes:
         console.print(f"  [bold]To:[/bold] {', '.join(to_list)}")
@@ -193,7 +206,7 @@ def send(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: bo
         console.print(f"  [bold]Subject:[/bold] {subject}")
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
         _show_attachment_info(attach)
-        click.confirm("Send this email?", abort=True)
+        confirm_action("Send this email?", action="send this email")
 
     client = _get_client()
 
@@ -234,6 +247,17 @@ def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: b
     client = _get_client()
     to_list = [addr.strip() for addr in to.split(",")]
     cc_list = list(cc) if cc else None
+    maybe_dry_run(
+        "draft",
+        {
+            "to": to_list,
+            "subject": subject,
+            "body": body,
+            "cc": cc_list,
+            "attach": list(attach),
+            "html": is_html,
+        },
+    )
     email = client.create_draft(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
 
     if attach:
@@ -252,6 +276,7 @@ def draft(to: str, subject: str, body: str, cc: tuple, attach: tuple, is_html: b
 @_handle_api_error
 def draft_send(message_id: str, yes: bool, account_name: str | None):
     """Send an existing draft by its message number."""
+    maybe_dry_run("draft-send", {"message_id": message_id})
     client = _get_client()
     if not yes:
         email = client.get_message(message_id)
@@ -259,7 +284,7 @@ def draft_send(message_id: str, yes: bool, account_name: str | None):
         if email.cc:
             console.print(f"  [bold]CC:[/bold] {', '.join(r.address for r in email.cc)}")
         console.print(f"  [bold]Subject:[/bold] {email.subject}")
-        click.confirm(f"Send draft #{message_id}?", abort=True)
+        confirm_action(f"Send draft #{message_id}?", action=f"send draft #{message_id}")
     client.send_draft(message_id)
     print_success(f"Draft #{message_id} sent")
 
@@ -274,13 +299,22 @@ def draft_send(message_id: str, yes: bool, account_name: str | None):
 @_handle_api_error
 def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool, account_name: str | None):
     """Reply to an email."""
+    maybe_dry_run(
+        "reply",
+        {
+            "message_id": message_id,
+            "body": body,
+            "reply_all": reply_all,
+            "attach": list(attach),
+        },
+    )
     client = _get_client()
     if not yes:
         action = "Reply all" if reply_all else "Reply"
         console.print(f"  [bold]{action} to #{message_id}[/bold]")
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
         _show_attachment_info(attach)
-        click.confirm("Send this reply?", abort=True)
+        confirm_action("Send this reply?", action="send this reply")
 
     if attach:
         # Draft flow: create reply draft -> attach -> send
@@ -307,12 +341,21 @@ def reply(message_id: str, body: str, reply_all: bool, attach: tuple, yes: bool,
 def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_html: bool, sig_name: str | None, as_json: bool, account_name: str | None):
     """Create a reply draft without sending."""
     from ..signature_manager import append_signature, get_signature
-
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name and body:
         sig_html = get_signature(sig_name)
         body, is_html = append_signature(body, sig_html, is_html)
 
+    maybe_dry_run(
+        "reply-draft",
+        {
+            "message_id": message_id,
+            "body": body,
+            "reply_all": reply_all,
+            "attach": list(attach),
+            "html": is_html,
+        },
+    )
     client = _get_client()
     email = client.create_reply_draft(message_id, comment=body, reply_all=reply_all, html=is_html)
 
@@ -337,12 +380,21 @@ def reply_draft(message_id: str, body: str, reply_all: bool, attach: tuple, is_h
 def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool, account_name: str | None):
     """Forward an email."""
     to_list = [addr.strip() for addr in to.split(",")]
+    maybe_dry_run(
+        "forward",
+        {
+            "message_id": message_id,
+            "to": to_list,
+            "comment": comment,
+            "attach": list(attach),
+        },
+    )
     if not yes:
         console.print(f"  [bold]Forward #{message_id} to:[/bold] {', '.join(to_list)}")
         if comment:
             console.print(f"  [bold]Comment:[/bold] {comment[:100]}{'...' if len(comment) > 100 else ''}")
         _show_attachment_info(attach)
-        click.confirm("Forward this email?", abort=True)
+        confirm_action("Forward this email?", action="forward this email")
 
     client = _get_client()
 

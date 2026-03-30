@@ -7,9 +7,11 @@ import click
 from ._common import (
     _handle_api_error,
     account_option,
+    confirm_action,
     cfg,
     console,
     get_token,
+    maybe_dry_run,
     print_success,
 )
 
@@ -72,7 +74,8 @@ def signature_delete(name: str, yes: bool, account_name: str | None):
     """Delete a saved signature."""
     from ..signature_manager import delete_signature
 
+    maybe_dry_run("signature-delete", {"name": name})
     if not yes:
-        click.confirm(f"Delete signature '{name}'?", abort=True)
+        confirm_action(f"Delete signature '{name}'?", action=f"delete signature '{name}'")
     delete_signature(name)
     print_success(f"Deleted signature '{name}'")

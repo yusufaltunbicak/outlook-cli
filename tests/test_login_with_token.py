@@ -21,7 +21,7 @@ class TestWithTokenLogin:
         """Test that --with-token rejects empty stdin."""
         result = runner.invoke(auth_cmd.login, ["--with-token"], input="")
 
-        assert result.exit_code == 1
+        assert result.exit_code == 2
         assert "No token provided" in result.output
 
     def test_with_token_validates_jwt_format(self, runner):

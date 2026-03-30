@@ -56,11 +56,24 @@ outlook whoami --account work
 - Every non-account command accepts `--account NAME`.
 - Selection precedence is: `--account NAME` → `OUTLOOK_ACCOUNT` → persisted current account → implicit `default`.
 - `outlook whoami` shows the active profile in both human and JSON output.
+- `--no-input` disables prompts and makes mutating commands fail safely unless `-y` is also provided.
+- `--dry-run` previews mutating commands without making API calls.
+- `--enable-commands` restricts which top-level commands are allowed for an agent/session.
 
 ```bash
 outlook inbox --account work
 outlook calendar --account personal --days 3
 outlook schedule-list --account work
+outlook --enable-commands whoami,inbox whoami --account work
+```
+
+### Automation / CI Safety
+
+```bash
+outlook whoami --json --no-input
+outlook delete 3 --no-input              # Fails safely unless -y is provided
+outlook send "to@email.com" "Subject" "Body" --dry-run --json
+outlook schedule "to@email.com" "Subject" "Body" "+1h" --dry-run
 ```
 
 ## Command Reference

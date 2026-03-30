@@ -7,6 +7,7 @@ import click
 from ._common import (
     _get_client,
     _handle_api_error,
+    _exit_with_error,
     _wants_json,
     account_option,
     do_login,
@@ -44,8 +45,7 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
         if with_token:
             token = sys.stdin.read().strip()
             if not token:
-                print_error("No token provided via stdin.")
-                sys.exit(1)
+                _exit_with_error(click.UsageError("No token provided via stdin."), "No token provided via stdin.")
             login_kwargs["token"] = token
         token = do_login(**login_kwargs)
         selected = get_account_name(account_name)
@@ -53,9 +53,10 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
             print_success(f"Logged in successfully for account '{selected}'. Token cached.")
         else:
             print_error("Login completed but token verification failed.")
+    except click.exceptions.Exit:
+        raise
     except (RuntimeError, ValueError) as e:
-        print_error(str(e))
-        sys.exit(1)
+        _exit_with_error(e)
 
 
 @click.command()

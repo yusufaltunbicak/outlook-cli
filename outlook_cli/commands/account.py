@@ -6,7 +6,7 @@ import click
 
 from .. import account as account_service
 from ..exceptions import AccountError
-from ._common import _handle_api_error, _wants_json, do_login, print_accounts, print_success, to_json_envelope
+from ._common import _handle_api_error, _wants_json, confirm_action, do_login, maybe_dry_run, print_accounts, print_success, to_json_envelope
 
 
 @click.group()
@@ -91,7 +91,8 @@ def current_account(as_json: bool):
 def remove_account(name: str, yes: bool):
     """Delete an account profile and its scoped data."""
     normalized = account_service.normalize_account_name(name)
+    maybe_dry_run("account.remove", {"name": normalized})
     if not yes:
-        click.confirm(f"Remove account profile '{normalized}'?", abort=True)
+        confirm_action(f"Remove account profile '{normalized}'?", action=f"remove account profile '{normalized}'")
     account_service.remove_account(normalized)
     print_success(f"Account profile '{normalized}' removed.")

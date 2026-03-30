@@ -24,7 +24,7 @@ def test_login_command_reports_success(runner, tty_mode, monkeypatch):
 def test_login_command_exits_on_runtime_error(runner, tty_mode, monkeypatch):
     errors = []
     monkeypatch.setattr(auth_cmd, "do_login", lambda force=False, debug=False, **kwargs: (_ for _ in ()).throw(RuntimeError("boom")))
-    monkeypatch.setattr(auth_cmd, "print_error", lambda msg: errors.append(msg))
+    monkeypatch.setattr("outlook_cli.commands._common.print_error", lambda msg: errors.append(msg))
 
     result = runner.invoke(auth_cmd.login, [])
 
