@@ -12,8 +12,10 @@ from ._common import (
     _handle_api_error,
     _wants_json,
     account_option,
+    confirm_action,
     cfg,
     console,
+    maybe_dry_run,
     print_error,
     print_success,
     to_json_envelope,
@@ -126,6 +128,18 @@ def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple
 
     to_list = [addr.strip() for addr in to.split(",")]
     cc_list = list(cc) if cc else None
+    maybe_dry_run(
+        "schedule",
+        {
+            "to": to_list,
+            "subject": subject,
+            "body": body,
+            "scheduled_at": send_at.isoformat(),
+            "cc": cc_list,
+            "attach": list(attach),
+            "html": is_html,
+        },
+    )
 
     if not yes:
         local_send = send_at.astimezone(datetime.now().astimezone().tzinfo)
@@ -136,7 +150,7 @@ def schedule(to: str, subject: str, body: str, at: str, cc: tuple, attach: tuple
         console.print(f"  [bold]Body:[/bold] {body[:100]}{'...' if len(body) > 100 else ''}")
         _show_attachment_info(attach)
         console.print(f"  [bold]Scheduled:[/bold] {local_send.strftime('%Y-%m-%d %H:%M')}")
-        click.confirm("Schedule this email?", abort=True)
+        confirm_action("Schedule this email?", action="schedule this email")
 
     client = _get_client()
     send_at_str = send_at.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -190,6 +204,7 @@ def schedule_cancel(index: int, yes: bool, account_name: str | None):
     For queued entries: removes local tracking only.
     Run schedule-list to see numbers.
     """
+    maybe_dry_run("schedule-cancel", {"index": index})
     client = _get_client()
     entries = client.get_scheduled_list()
     if index < 1 or index > len(entries):
@@ -201,7 +216,7 @@ def schedule_cancel(index: int, yes: bool, account_name: str | None):
         console.print(f"  [bold]To:[/bold] {', '.join(entry['to'])}")
         console.print(f"  [bold]Subject:[/bold] {entry['subject']}")
         console.print(f"  [bold]Scheduled:[/bold] {entry['scheduled_at']}")
-        click.confirm(f"Remove scheduled entry #{index}?", abort=True)
+        confirm_action(f"Remove scheduled entry #{index}?", action=f"remove scheduled entry #{index}")
 
     result = client.cancel_scheduled_entry(index)
     if result and result.get("server_deleted"):
@@ -223,6 +238,10 @@ def schedule_draft(message_id: str, at: str, yes: bool, account_name: str | None
     +30m, +1h, +2h30m (relative), tomorrow 09:00, 2024-03-15T10:00
     """
     send_at = _parse_schedule_time(at)
+    maybe_dry_run(
+        "schedule-draft",
+        {"message_id": message_id, "scheduled_at": send_at.isoformat()},
+    )
     client = _get_client()
 
     if not yes:
@@ -233,7 +252,7 @@ def schedule_draft(message_id: str, at: str, yes: bool, account_name: str | None
             console.print(f"  [bold]CC:[/bold] {', '.join(r.address for r in email.cc)}")
         console.print(f"  [bold]Subject:[/bold] {email.subject}")
         console.print(f"  [bold]Scheduled:[/bold] {local_send.strftime('%Y-%m-%d %H:%M')}")
-        click.confirm(f"Schedule draft #{message_id}?", abort=True)
+        confirm_action(f"Schedule draft #{message_id}?", action=f"schedule draft #{message_id}")
 
     client.schedule_draft(message_id, send_at.strftime("%Y-%m-%dT%H:%M:%SZ"))
 

@@ -78,6 +78,20 @@ Profile-scoped files:
 
 Existing single-account installs continue to work through the implicit `default` profile and legacy paths until a per-profile `default/` directory exists.
 
+## Exit Codes
+
+For automation and scripting, `outlook` uses stable process exit codes:
+
+- `0` success
+- `1` generic failure
+- `2` usage / bad parameters
+- `4` authentication required / session expired
+- `5` resource not found
+- `7` rate limited
+- `8` retryable transient error
+- `10` configuration or account/storage error
+- `130` interrupted
+
 ## Usage
 
 Examples with an explicit profile:

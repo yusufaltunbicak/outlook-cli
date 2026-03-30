@@ -11,6 +11,7 @@ import pytest
 
 from outlook_cli import cli as cli_module
 from outlook_cli.commands import _common as common
+from outlook_cli.commands import manage, schedule
 from outlook_cli.config import DEFAULTS, _deep_merge, load_config
 from outlook_cli.exceptions import AuthRequiredError, ResourceNotFoundError, TokenExpiredError
 
@@ -69,13 +70,14 @@ def test_get_client_caches_single_instance(monkeypatch):
 def test_get_client_exits_when_auth_is_unavailable(monkeypatch):
     common._client_cache.clear()
     messages = []
+    monkeypatch.setattr(common, "_is_piped", lambda: False)
     monkeypatch.setattr(common, "get_token", lambda *args, **kwargs: (_ for _ in ()).throw(AuthRequiredError("login required")))
     monkeypatch.setattr(common, "print_error", lambda msg: messages.append(msg))
 
-    with pytest.raises(SystemExit) as exc:
+    with pytest.raises(click.exceptions.Exit) as exc:
         common._get_client()
 
-    assert exc.value.code == 1
+    assert exc.value.exit_code == 4
     assert messages == ["login required"]
 
 
@@ -154,7 +156,7 @@ def test_handle_api_error_returns_json_envelope(monkeypatch, runner, tty_mode):
 
     result = runner.invoke(cmd, ["--json"])
 
-    assert result.exit_code == 1
+    assert result.exit_code == 5
     payload = json.loads(result.output)
     assert payload["ok"] is False
     assert payload["error"]["code"] == "not_found"
@@ -172,9 +174,80 @@ def test_handle_api_error_reports_failed_relogin(monkeypatch, runner, tty_mode):
 
     result = runner.invoke(cmd, ["--json"])
 
-    assert result.exit_code == 1
-    assert '"code": "session_expired"' in result.output
-    assert '"code": "auth_failed"' in result.output
+    assert result.exit_code == 4
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "auth_failed"
+    assert "Token expired. Attempting re-login..." in result.stderr
+
+
+def test_handle_api_error_json_retry_keeps_stdout_single_payload(monkeypatch, runner, tty_mode):
+    common._client_cache = {"default": object()}
+    state = {"calls": 0}
+    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
+
+    @click.command()
+    @click.option("--json", "as_json", is_flag=True)
+    @common._handle_api_error
+    def cmd(as_json: bool):
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise TokenExpiredError("expired")
+        click.echo(common.to_json_envelope({"status": "ok"}))
+
+    result = runner.invoke(cmd, ["--json"])
+
+    assert result.exit_code == 0
+    assert state["calls"] == 2
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["status"] == "ok"
+    assert result.stderr.count("Token expired. Attempting re-login...") == 1
+    assert result.stderr.count("Re-login successful. Retrying...") == 1
+
+
+def test_handle_api_error_pipe_mode_retry_keeps_stdout_single_payload(monkeypatch, runner):
+    common._client_cache = {"default": object()}
+    state = {"calls": 0}
+    monkeypatch.setattr(common, "_is_piped", lambda: True)
+    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
+
+    @click.command()
+    @common._handle_api_error
+    def cmd():
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise TokenExpiredError("expired")
+        click.echo(common.to_json_envelope({"status": "ok"}))
+
+    result = runner.invoke(cmd, [])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["status"] == "ok"
+    assert "Token expired. Attempting re-login..." in result.stderr
+
+
+def test_check_token_expiry_json_mode_writes_status_to_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(common, "_is_json_mode", lambda: True)
+    monkeypatch.setattr(common, "_decode_exp", lambda token: 0)
+    monkeypatch.delenv("OUTLOOK_TOKEN", raising=False)
+    monkeypatch.setattr(common, "do_login", lambda **kwargs: "fresh-token")
+
+    token = common._check_token_expiry("stale-token", "default")
+
+    captured = capsys.readouterr()
+    assert token == "fresh-token"
+    assert captured.out == ""
+    assert "Token expiring soon. Re-authenticating..." in captured.err
+
+
+def test_confirm_action_rejects_non_interactive_without_yes(monkeypatch):
+    monkeypatch.setattr(common, "_stdin_is_tty", lambda: False)
+
+    with pytest.raises(click.UsageError, match="Refusing to delete #1 without --yes"):
+        common.confirm_action("Delete #1?", action="delete #1")
 
 
 def test_cli_registers_expected_commands():
@@ -247,3 +320,123 @@ def test_cli_without_args_shows_help(runner):
 
     assert result.exit_code == 0
     assert "Usage:" in result.output
+
+
+def test_cli_no_input_after_subcommand_rejects_delete(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(manage, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(cli_module.cli, ["delete", "1", "--no-input"])
+
+    assert result.exit_code == 2
+    assert "Refusing to delete #1 without --yes" in result.output
+    fake_client.delete_message.assert_not_called()
+
+
+def test_cli_no_input_after_subcommand_rejects_schedule(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(schedule, "_get_client", lambda: fake_client)
+    monkeypatch.setitem(schedule.cfg, "default_signature", None)
+
+    result = runner.invoke(
+        cli_module.cli,
+        ["schedule", "a@example.com", "Subject", "Body", "+30m", "--no-input"],
+    )
+
+    assert result.exit_code == 2
+    assert "Refusing to schedule this email without --yes" in result.output
+    fake_client.schedule_send.assert_not_called()
+
+
+def test_cli_no_input_allows_yes_bypass(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(manage, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(cli_module.cli, ["--no-input", "delete", "1", "-y"])
+
+    assert result.exit_code == 0
+    fake_client.delete_message.assert_called_once_with("1")
+
+
+def test_cli_dry_run_after_subcommand_outputs_json_and_skips_send(runner, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(cli_module.mail_mod, "_get_client", lambda: fake_client)
+    monkeypatch.setitem(cli_module.mail_mod.cfg, "default_signature", None)
+
+    result = runner.invoke(
+        cli_module.cli,
+        ["send", "a@example.com", "Subject", "Body", "--dry-run", "--json"],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is True
+    assert payload["data"]["dry_run"] is True
+    assert payload["data"]["op"] == "send"
+    assert payload["data"]["request"]["to"] == ["a@example.com"]
+    fake_client.send_mail.assert_not_called()
+
+
+def test_cli_dry_run_human_output_skips_delete(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(manage, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(cli_module.cli, ["delete", "1", "--dry-run"])
+
+    assert result.exit_code == 0
+    assert "Dry run: would delete" in result.output
+    fake_client.delete_message.assert_not_called()
+
+
+def test_cli_dry_run_bypasses_no_input_confirmation(runner, tty_mode, monkeypatch):
+    fake_client = MagicMock()
+    monkeypatch.setattr(manage, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(cli_module.cli, ["delete", "1", "--dry-run", "--no-input"])
+
+    assert result.exit_code == 0
+    assert "Dry run: would delete" in result.output
+    fake_client.delete_message.assert_not_called()
+
+
+def test_cli_enable_commands_allows_specific_command(runner, tty_mode, monkeypatch):
+    fake_client = type("Client", (), {"get_me": lambda self: {"DisplayName": "Alice"}})()
+    monkeypatch.setattr(cli_module.auth_mod, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(cli_module.auth_mod, "get_account_name", lambda account_name=None: "default")
+
+    result = runner.invoke(cli_module.cli, ["--enable-commands", "whoami", "whoami", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["data"]["DisplayName"] == "Alice"
+
+
+def test_cli_enable_commands_rewrites_option_after_subcommand(runner, tty_mode, monkeypatch):
+    fake_client = type("Client", (), {"get_me": lambda self: {"DisplayName": "Alice"}})()
+    monkeypatch.setattr(cli_module.auth_mod, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(cli_module.auth_mod, "get_account_name", lambda account_name=None: "default")
+
+    result = runner.invoke(cli_module.cli, ["whoami", "--enable-commands", "whoami", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["data"]["DisplayName"] == "Alice"
+
+
+def test_cli_enable_commands_blocks_other_commands(runner, tty_mode):
+    result = runner.invoke(cli_module.cli, ["--enable-commands", "whoami", "inbox"])
+
+    assert result.exit_code == 2
+    assert "Command 'inbox' is not enabled." in result.output
+
+
+def test_cli_enable_commands_all_keyword_allows_commands(runner, tty_mode, monkeypatch):
+    fake_client = type("Client", (), {"get_me": lambda self: {"DisplayName": "Alice"}})()
+    monkeypatch.setattr(cli_module.auth_mod, "_get_client", lambda: fake_client)
+    monkeypatch.setattr(cli_module.auth_mod, "get_account_name", lambda account_name=None: "default")
+
+    result = runner.invoke(cli_module.cli, ["--enable-commands", "all", "whoami", "--json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["data"]["DisplayName"] == "Alice"

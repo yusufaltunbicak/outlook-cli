@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import click
 
-from ._common import _get_client, _handle_api_error, account_option, print_success
+from ._common import _get_client, _handle_api_error, account_option, confirm_action, maybe_dry_run, print_success
 
 
 @click.command("mark-read")
@@ -31,6 +31,7 @@ def mark_read(message_ids: tuple, unread: bool, account_name: str | None):
 @_handle_api_error
 def move(message_ids: tuple, destination: str, account_name: str | None):
     """Move messages to another folder. Accepts multiple IDs."""
+    maybe_dry_run("move", {"message_ids": list(message_ids), "destination": destination})
     client = _get_client()
     for mid in message_ids:
         client.move_message(mid, destination)
@@ -44,6 +45,7 @@ def move(message_ids: tuple, destination: str, account_name: str | None):
 @_handle_api_error
 def copy(message_ids: tuple, destination: str, account_name: str | None):
     """Copy messages to another folder. Accepts multiple IDs."""
+    maybe_dry_run("copy", {"message_ids": list(message_ids), "destination": destination})
     client = _get_client()
     for mid in message_ids:
         client.copy_message(mid, destination)
@@ -57,9 +59,10 @@ def copy(message_ids: tuple, destination: str, account_name: str | None):
 @_handle_api_error
 def delete(message_ids: tuple, yes: bool, account_name: str | None):
     """Delete messages. Accepts multiple IDs."""
+    maybe_dry_run("delete", {"message_ids": list(message_ids)})
     if not yes:
         ids_str = ", ".join(f"#{m}" for m in message_ids)
-        click.confirm(f"Delete {ids_str}?", abort=True)
+        confirm_action(f"Delete {ids_str}?", action=f"delete {ids_str}")
     client = _get_client()
     for mid in message_ids:
         client.delete_message(mid)
@@ -128,6 +131,14 @@ def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool, accou
 
     due_date = _parse_due_date(due) if due else None
 
+    maybe_dry_run(
+        "flag",
+        {
+            "message_ids": list(message_ids),
+            "status": status,
+            "due_date": due_date,
+        },
+    )
     client = _get_client()
     for mid in message_ids:
         client.set_flag(mid, status=status, due_date=due_date)
@@ -155,6 +166,13 @@ def pin(message_ids: tuple, unpin: bool, account_name: str | None):
       outlook pin 3 4 5          # pin multiple messages
       outlook pin 3 --unpin      # unpin message
     """
+    maybe_dry_run(
+        "pin",
+        {
+            "message_ids": list(message_ids),
+            "pinned": not unpin,
+        },
+    )
     client = _get_client()
     for mid in message_ids:
         client.pin_message(mid, pinned=not unpin)

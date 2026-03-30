@@ -10,11 +10,20 @@ from copy import deepcopy
 from typing import Iterator
 
 import click
+import httpx
 
 from .. import account as account_service
 from ..auth import _decode_exp, get_token as auth_get_token, login as auth_login, verify_token
 from ..client import OutlookClient
-from ..exceptions import AccountError, AuthRequiredError, OutlookCliError, ResourceNotFoundError, TokenExpiredError, error_code_for_exception
+from ..exceptions import (
+    AccountError,
+    AuthRequiredError,
+    OutlookCliError,
+    ResourceNotFoundError,
+    TokenExpiredError,
+    error_code_for_exception,
+    exit_code_for_exception,
+)
 from ..formatter import (
     console,
     print_attachments,
@@ -83,6 +92,16 @@ cfg = ConfigProxy()
 _client_cache: dict[str, OutlookClient] = {}
 
 
+def _exit_with_error(exc: Exception, message: str | None = None, *, error_code: str | None = None) -> None:
+    """Emit a user-facing error and exit with a stable code."""
+    text = message or str(exc)
+    if _is_json_mode():
+        click.echo(error_json(error_code or error_code_for_exception(exc), text))
+    else:
+        print_error(text)
+    raise click.exceptions.Exit(exit_code_for_exception(exc))
+
+
 def account_option(fn):
     return click.option(
         "--account",
@@ -90,6 +109,56 @@ def account_option(fn):
         default=None,
         help="Use a specific account profile",
     )(fn)
+
+
+def _root_context() -> click.Context | None:
+    ctx = click.get_current_context(silent=True)
+    while ctx and ctx.parent:
+        ctx = ctx.parent
+    return ctx
+
+
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
+def is_no_input_mode() -> bool:
+    ctx = _root_context()
+    return bool(ctx and isinstance(ctx.obj, dict) and ctx.obj.get("no_input"))
+
+
+def is_dry_run_mode() -> bool:
+    ctx = _root_context()
+    return bool(ctx and isinstance(ctx.obj, dict) and ctx.obj.get("dry_run"))
+
+
+def confirm_action(prompt: str, *, yes: bool = False, action: str | None = None) -> None:
+    """Prompt for confirmation unless bypassed or running non-interactively."""
+    if yes:
+        return
+    if is_no_input_mode() or not _stdin_is_tty():
+        action_text = action or prompt.rstrip(" ?")
+        raise click.UsageError(f"Refusing to {action_text} without --yes (non-interactive).")
+    click.confirm(prompt, abort=True)
+
+
+def maybe_dry_run(op: str, request: dict | None = None) -> None:
+    """Emit a dry-run preview and exit successfully when enabled."""
+    if not is_dry_run_mode():
+        return
+
+    payload: dict[str, object] = {"dry_run": True, "op": op}
+    if request is not None:
+        payload["request"] = request
+
+    if _is_json_mode():
+        click.echo(to_json_envelope(payload))
+    else:
+        click.echo(f"Dry run: would {op}")
+        if request is not None:
+            click.echo(to_json(request))
+
+    raise click.exceptions.Exit(0)
 
 
 def _ctx_account_name() -> str | None:
@@ -144,8 +213,7 @@ def _get_client(account_name: str | None = None) -> OutlookClient:
 
         token = _check_token_expiry(get_token(selected), selected)
     except (AuthRequiredError, RuntimeError, AccountError, ValueError) as exc:
-        print_error(str(exc))
-        sys.exit(1)
+        _exit_with_error(exc)
 
     _client_cache[selected] = OutlookClient(token, account_name=selected)
     account_service.touch_account(selected)
@@ -177,36 +245,42 @@ def _handle_api_error(fn):
     def wrapper(*args, **kwargs):
         try:
             return fn(*args, **kwargs)
+        except click.Abort:
+            raise
+        except click.exceptions.Exit:
+            raise
         except TokenExpiredError:
             selected = get_account_name()
             if _is_json_mode():
-                click.echo(error_json("session_expired", "Token expired. Attempting re-login..."))
+                click.echo("Token expired. Attempting re-login...", err=True)
             else:
                 print_error("Token expired. Attempting re-login...")
             try:
                 login_kwargs = {"account_name": selected} if selected != "default" or _ctx_account_name() else {}
                 do_login(**login_kwargs)
-                print_success("Re-login successful. Retrying...")
+                if _is_json_mode():
+                    click.echo("Re-login successful. Retrying...", err=True)
+                else:
+                    print_success("Re-login successful. Retrying...")
                 _client_cache.pop(selected, None)
                 return fn(*args, **kwargs)
             except Exception:
-                if _is_json_mode():
-                    click.echo(error_json("auth_failed", "Auto re-login failed. Run: outlook login --force"))
-                else:
-                    print_error("Auto re-login failed. Run: outlook login --force")
-                sys.exit(1)
+                _exit_with_error(
+                    AuthRequiredError("Auto re-login failed. Run: outlook login --force"),
+                    "Auto re-login failed. Run: outlook login --force",
+                    error_code="auth_failed",
+                )
+        except click.ClickException as exc:
+            if _is_json_mode():
+                click.echo(error_json(error_code_for_exception(exc), exc.format_message()))
+                raise click.exceptions.Exit(exit_code_for_exception(exc))
+            raise
         except OutlookCliError as exc:
-            if _is_json_mode():
-                click.echo(error_json(error_code_for_exception(exc), str(exc)))
-            else:
-                print_error(str(exc))
-            sys.exit(1)
+            _exit_with_error(exc)
+        except httpx.HTTPError as exc:
+            _exit_with_error(exc)
         except Exception as exc:
-            if _is_json_mode():
-                click.echo(error_json("unknown_error", str(exc)))
-            else:
-                print_error(f"Error: {exc}")
-            sys.exit(1)
+            _exit_with_error(exc, f"Error: {exc}")
 
     return wrapper
 
@@ -221,7 +295,7 @@ def _check_token_expiry(token: str, account_name: str, *, buffer_seconds: int = 
         return token
 
     if _is_json_mode():
-        console.print("[yellow]Token expiring soon. Re-authenticating...[/yellow]")
+        click.echo("Token expiring soon. Re-authenticating...", err=True)
     else:
         print_error("Token expiring soon. Re-authenticating...")
 

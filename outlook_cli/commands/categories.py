@@ -9,8 +9,10 @@ from ._common import (
     _handle_api_error,
     _wants_json,
     account_option,
+    confirm_action,
     console,
     get_token,
+    maybe_dry_run,
     print_categories,
     print_success,
     to_json_envelope,
@@ -43,6 +45,7 @@ def categories(as_json: bool, account_name: str | None):
 @_handle_api_error
 def categorize(message_ids: tuple, category: str, account_name: str | None):
     """Add a category to messages. Accepts multiple IDs."""
+    maybe_dry_run("categorize", {"message_ids": list(message_ids), "category": category})
     client = _get_client()
     for mid in message_ids:
         result = client.add_category(mid, category)
@@ -56,6 +59,7 @@ def categorize(message_ids: tuple, category: str, account_name: str | None):
 @_handle_api_error
 def uncategorize(message_ids: tuple, category: str, account_name: str | None):
     """Remove a category from messages. Accepts multiple IDs."""
+    maybe_dry_run("uncategorize", {"message_ids": list(message_ids), "category": category})
     client = _get_client()
     for mid in message_ids:
         result = client.remove_category(mid, category)
@@ -98,8 +102,15 @@ def category_clear(name: str, folder: str | None, max_messages: int | None, yes:
 
     scope = f"in '{folder}'" if folder else "in all folders"
     limit = f" (max {max_messages})" if max_messages else ""
+    maybe_dry_run(
+        "category-clear",
+        {"name": name, "folder": folder, "max_messages": max_messages},
+    )
     if not yes:
-        click.confirm(f"Remove '{name}' from messages {scope}{limit}?", abort=True)
+        confirm_action(
+            f"Remove '{name}' from messages {scope}{limit}?",
+            action=f"remove category '{name}' from messages {scope}{limit}",
+        )
 
     def on_progress(done, _total):
         console.print(f"  [dim]{done} messages cleared...[/dim]")
@@ -119,8 +130,15 @@ def category_delete(name: str, no_propagate: bool, yes: bool, account_name: str 
     """Delete a master category and remove it from all messages."""
     from ..category_manager import clear_category, delete_category
 
+    maybe_dry_run(
+        "category-delete",
+        {"name": name, "no_propagate": no_propagate},
+    )
     if not yes:
-        click.confirm(f"Delete category '{name}' and remove from all messages?", abort=True)
+        confirm_action(
+            f"Delete category '{name}' and remove from all messages?",
+            action=f"delete category '{name}' and remove it from messages",
+        )
 
     token = get_token()
 

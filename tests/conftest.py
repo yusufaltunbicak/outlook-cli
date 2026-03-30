@@ -47,6 +47,7 @@ def runner() -> CliRunner:
 @pytest.fixture
 def tty_mode(monkeypatch):
     monkeypatch.setattr(common, "_is_piped", lambda: False)
+    monkeypatch.setattr(common, "_stdin_is_tty", lambda: True)
 
 
 @pytest.fixture
