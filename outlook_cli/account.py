@@ -300,6 +300,9 @@ def remove_account(name: str) -> None:
     if name != "default":
         ensure_account_known(name, registry)
 
+    from . import auth as auth_service
+
+    auth_service.delete_stored_token(name)
     paths = get_account_paths(name)
     if paths.uses_legacy_default:
         for path in (TOKEN_FILE, BROWSER_STATE_FILE, ID_MAP_FILE, SCHEDULED_FILE):

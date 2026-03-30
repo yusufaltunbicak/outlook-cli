@@ -37,6 +37,7 @@ playwright install chromium
 - Existing single-account installs continue to work through the implicit `default` profile and legacy cache paths.
 - Auto re-login on 401 is profile-aware.
 - `OUTLOOK_TOKEN` is still supported, but if a profile is bound it must match that profile's mailbox.
+- Bearer tokens are stored in the OS keychain/keyring; `token.json` remains on disk only as non-secret metadata and is migrated automatically on first use.
 
 ```bash
 outlook login                              # Interactive browser login

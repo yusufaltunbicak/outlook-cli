@@ -31,6 +31,7 @@ dependencies = [
     "httpx>=0.25",
     "playwright>=1.40",
     "beautifulsoup4>=4.12",
+    "keyring>=25.0",
 ]
 
 [project.urls]

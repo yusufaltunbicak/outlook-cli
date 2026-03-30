@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from outlook_cli import account as account_service
+from outlook_cli import auth as auth_mod
 from outlook_cli import client as client_mod
 from outlook_cli import signature_manager as signature_manager_mod
 from outlook_cli.account import AccountPaths
@@ -99,6 +100,30 @@ def test_bind_account_rejects_duplicate_mailbox(monkeypatch, tmp_path):
             "personal",
             {"Id": "mailbox-1", "EmailAddress": "user@example.com", "DisplayName": "User"},
         )
+
+
+def test_remove_account_deletes_stored_keyring_token(monkeypatch, tmp_path):
+    _patch_account_roots(monkeypatch, tmp_path)
+    account_service.CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    account_service.ACCOUNTS_FILE.write_text(
+        json.dumps(
+            {
+                "current_account": "default",
+                "accounts": {
+                    "work": {"name": "work", "mailbox_id": "mailbox-1", "email": "work@example.com"},
+                },
+            }
+        )
+    )
+    paths = account_service.get_account_paths("work")
+    paths.cache_dir.mkdir(parents=True, exist_ok=True)
+    paths.config_dir.mkdir(parents=True, exist_ok=True)
+    deleted = []
+    monkeypatch.setattr(auth_mod, "delete_stored_token", lambda name=None: deleted.append(name))
+
+    account_service.remove_account("work")
+
+    assert deleted == ["work"]
 
 
 def test_load_account_config_merges_global_and_profile_overrides(monkeypatch, tmp_path):

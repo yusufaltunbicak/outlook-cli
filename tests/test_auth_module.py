@@ -66,6 +66,22 @@ def _patch_account(monkeypatch, tmp_path: Path, *, bound: dict | None = None):
     return paths
 
 
+def _patch_keyring(monkeypatch):
+    store: dict[tuple[str, str], str] = {}
+
+    monkeypatch.setattr(auth.keyring, "set_password", lambda service, username, token: store.__setitem__((service, username), token))
+    monkeypatch.setattr(auth.keyring, "get_password", lambda service, username: store.get((service, username)))
+
+    def delete_password(service, username):
+        key = (service, username)
+        if key not in store:
+            raise auth.keyring.errors.PasswordDeleteError("missing")
+        del store[key]
+
+    monkeypatch.setattr(auth.keyring, "delete_password", delete_password)
+    return store
+
+
 class _FakePage:
     def __init__(self, context, token: str | None, raise_on_wait: bool):
         self._context = context
@@ -184,13 +200,15 @@ def test_decode_helpers_parse_jwt():
 
 def test_load_cached_token_honors_expiry(monkeypatch, tmp_path):
     paths = _patch_account(monkeypatch, tmp_path)
+    store = _patch_keyring(monkeypatch)
     monkeypatch.setattr(auth.time, "time", lambda: 1_000)
     monkeypatch.setattr(auth, "_assert_token_matches_account", lambda *args, **kwargs: {})
 
-    paths.token_file.write_text(json.dumps({"token": "cached", "expires_at": 2_000}))
+    store[(auth.KEYRING_SERVICE_NAME, auth._keyring_username("default"))] = "cached"
+    paths.token_file.write_text(json.dumps({"storage_backend": "keyring", "storage_version": 1, "expires_at": 2_000}))
     assert auth._load_cached_token() == "cached"
 
-    paths.token_file.write_text(json.dumps({"token": "expired", "expires_at": 1_200}))
+    paths.token_file.write_text(json.dumps({"storage_backend": "keyring", "storage_version": 1, "expires_at": 1_200}))
     assert auth._load_cached_token() is None
 
     paths.token_file.write_text("{not-json")
@@ -199,6 +217,7 @@ def test_load_cached_token_honors_expiry(monkeypatch, tmp_path):
 
 def test_save_token_writes_expected_payload(monkeypatch, tmp_path):
     paths = _patch_account(monkeypatch, tmp_path)
+    store = _patch_keyring(monkeypatch)
     monkeypatch.setattr(auth, "_decode_exp", lambda _token: 1234.0)
     chmod_calls = []
     monkeypatch.setattr(auth, "_chmod_600", lambda path: chmod_calls.append(path))
@@ -206,13 +225,50 @@ def test_save_token_writes_expected_payload(monkeypatch, tmp_path):
     auth._save_token("saved-token", mailbox_info={"mailbox_id": "m-1", "email": "u@example.com", "display_name": "User"})
 
     assert json.loads(paths.token_file.read_text()) == {
-        "token": "saved-token",
+        "storage_backend": "keyring",
+        "storage_version": 1,
         "expires_at": 1234.0,
         "mailbox_id": "m-1",
         "email": "u@example.com",
         "display_name": "User",
     }
+    assert store[(auth.KEYRING_SERVICE_NAME, auth._keyring_username("default"))] == "saved-token"
     assert chmod_calls == [paths.token_file]
+
+
+def test_load_cached_token_migrates_legacy_plaintext_token(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    store = _patch_keyring(monkeypatch)
+    monkeypatch.setattr(auth.time, "time", lambda: 1_000)
+    monkeypatch.setattr(auth, "_assert_token_matches_account", lambda *args, **kwargs: {})
+
+    paths.token_file.write_text(
+        json.dumps(
+            {
+                "token": "legacy-token",
+                "expires_at": 2_000,
+                "mailbox_id": "mailbox-1",
+                "email": "user@example.com",
+                "display_name": "User",
+            }
+        )
+    )
+
+    assert auth._load_cached_token() == "legacy-token"
+    assert store[(auth.KEYRING_SERVICE_NAME, auth._keyring_username("default"))] == "legacy-token"
+    migrated = json.loads(paths.token_file.read_text())
+    assert "token" not in migrated
+    assert migrated["storage_backend"] == "keyring"
+    assert migrated["email"] == "user@example.com"
+
+
+def test_load_cached_token_requires_keyring_secret(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    _patch_keyring(monkeypatch)
+    paths.token_file.write_text(json.dumps({"storage_backend": "keyring", "storage_version": 1, "expires_at": 2_000}))
+
+    with pytest.raises(AccountError, match="not found in the keyring"):
+        auth._load_cached_token()
 
 
 def test_pick_best_token_prefers_working_mail_endpoint(monkeypatch):

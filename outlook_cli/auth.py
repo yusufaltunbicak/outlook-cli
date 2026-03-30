@@ -9,10 +9,15 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import keyring
+import keyring.errors
 
 from . import account as account_service
-from .constants import BASE_URL, OWA_URL, USER_AGENT
+from .constants import BASE_URL, KEYRING_SERVICE_NAME, OWA_URL, USER_AGENT
 from .exceptions import AccountError, AuthRequiredError, TokenExpiredError
+
+TOKEN_STORAGE_BACKEND = "keyring"
+TOKEN_STORAGE_VERSION = 1
 
 
 def get_token(account_name: str | None = None) -> str:
@@ -239,11 +244,21 @@ def _load_cached_token(account_name: str | None = None) -> str | None:
 
     try:
         data = json.loads(token_file.read_text())
+    except json.JSONDecodeError:
+        return None
+
+    if "token" in data:
         token = data["token"]
-        expires_at = data.get("expires_at", 0)
-        if time.time() > expires_at - 300:
-            return None
-    except (json.JSONDecodeError, KeyError):
+        info = {
+            "mailbox_id": data.get("mailbox_id"),
+            "email": data.get("email"),
+            "display_name": data.get("display_name"),
+        }
+        _save_token(token, selected, info)
+        data = _load_token_metadata(token_file) or {}
+    token = _load_token_secret(selected)
+    expires_at = data.get("expires_at", 0)
+    if time.time() > expires_at - 300:
         return None
 
     cached_mailbox = {
@@ -264,8 +279,10 @@ def _save_token(token: str, account_name: str | None = None, mailbox_info: dict[
     token_file = account_service.get_account_paths(selected).token_file
     token_file.parent.mkdir(parents=True, exist_ok=True)
     info = mailbox_info or {}
+    _store_token_secret(selected, token)
     data = {
-        "token": token,
+        "storage_backend": TOKEN_STORAGE_BACKEND,
+        "storage_version": TOKEN_STORAGE_VERSION,
         "expires_at": _decode_exp(token),
         "mailbox_id": info.get("mailbox_id"),
         "email": info.get("email"),
@@ -273,6 +290,52 @@ def _save_token(token: str, account_name: str | None = None, mailbox_info: dict[
     }
     token_file.write_text(json.dumps(data))
     _chmod_600(token_file)
+
+
+def delete_stored_token(account_name: str | None = None) -> None:
+    selected = account_service.resolve_account_name(account_name, allow_missing=True)
+    try:
+        keyring.delete_password(KEYRING_SERVICE_NAME, _keyring_username(selected))
+    except keyring.errors.PasswordDeleteError:
+        pass
+    except keyring.errors.KeyringError as exc:
+        raise AccountError(f"Could not delete stored token for account '{selected}': {exc}") from exc
+
+
+def _load_token_metadata(token_file: Path) -> dict[str, Any] | None:
+    if not token_file.exists():
+        return None
+    try:
+        return json.loads(token_file.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+def _keyring_username(account_name: str) -> str:
+    return f"token:{account_name}"
+
+
+def _store_token_secret(account_name: str, token: str) -> None:
+    try:
+        keyring.set_password(KEYRING_SERVICE_NAME, _keyring_username(account_name), token)
+    except keyring.errors.KeyringError as exc:
+        raise AccountError(
+            f"Could not store token securely for account '{account_name}'. Check keyring availability."
+        ) from exc
+
+
+def _load_token_secret(account_name: str) -> str:
+    try:
+        token = keyring.get_password(KEYRING_SERVICE_NAME, _keyring_username(account_name))
+    except keyring.errors.KeyringError as exc:
+        raise AccountError(
+            f"Could not read stored token for account '{account_name}'. Check keyring availability."
+        ) from exc
+    if not token:
+        raise AccountError(
+            f"Stored token for account '{account_name}' was not found in the keyring. Run: outlook login"
+        )
+    return token
 
 
 def _decode_exp(token: str) -> float:

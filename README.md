@@ -78,6 +78,8 @@ Profile-scoped files:
 
 Existing single-account installs continue to work through the implicit `default` profile and legacy paths until a per-profile `default/` directory exists.
 
+Bearer tokens are now stored in your OS keychain/keyring. The `token.json` file remains on disk only as non-secret metadata (`expires_at`, mailbox identity, storage marker). On first use, older plaintext `token.json` files are migrated automatically into the keyring.
+
 ## Exit Codes
 
 For automation and scripting, `outlook` uses stable process exit codes:
@@ -392,16 +394,19 @@ All JSON output uses a structured envelope:
 
 This tool caches sensitive authentication data on your local machine:
 
-- **Bearer token** (`~/.cache/outlook-cli/token.json` or `~/.cache/outlook-cli/accounts/<profile>/token.json`) — grants full access to that mailbox, calendar, and contacts until it expires. Protect this file as you would a password.
+- **Bearer token** — stored in your OS keychain/keyring under the `outlook-cli` service.
+- **Token metadata** (`~/.cache/outlook-cli/token.json` or `~/.cache/outlook-cli/accounts/<profile>/token.json`) — non-secret metadata such as `expires_at`, mailbox identity, and storage marker.
 - **Browser session state** (`~/.cache/outlook-cli/browser-state.json` or `~/.cache/outlook-cli/accounts/<profile>/browser-state.json`) — contains cookies and SSO state that can be used to obtain new tokens without re-authentication.
 
-Both files are created with `600` permissions (owner-only read/write) on Unix systems. Never share these files or commit them to version control.
+Cache files are created with `600` permissions (owner-only read/write) on Unix systems. Never share browser state files or commit them to version control.
 
 To revoke access for all profiles, delete the cache directory:
 
 ```sh
 rm -rf ~/.cache/outlook-cli/
 ```
+
+If you also want to clear stored bearer tokens, remove the `outlook-cli` entries from your OS keychain/keyring.
 
 To revoke access for a single named profile, delete its scoped cache directory:
 

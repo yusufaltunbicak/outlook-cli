@@ -36,3 +36,6 @@ DEFERRED_SEND_PROPERTY_ID = "SystemTime 0x3FEF"
 
 # Scheduled messages tracking
 SCHEDULED_FILE = CACHE_DIR / "scheduled.json"
+
+# Secret storage
+KEYRING_SERVICE_NAME = "outlook-cli"
