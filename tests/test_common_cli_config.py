@@ -41,7 +41,7 @@ def test_load_config_deep_merges_nested_values(tmp_path):
 
     assert cfg["max_messages"] == 50
     assert cfg["browser"]["timeout"] == 300
-    assert cfg["browser"]["headless"] is False
+    assert cfg["browser"]["headless"] is True
 
 
 def test_deep_merge_overrides_leaf_values():

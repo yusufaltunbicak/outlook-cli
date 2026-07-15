@@ -39,7 +39,7 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
     import sys
 
     try:
-        login_kwargs = {"force": force, "debug": debug}
+        login_kwargs = {"force": force, "debug": debug, "headless": False}
         if account_name:
             login_kwargs["account_name"] = account_name
         if with_token:

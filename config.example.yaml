@@ -14,9 +14,10 @@ default_signature: null
 # See: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/default-time-zones
 timezone: UTC
 
-# Browser settings for login
+# Browser settings for refresh
+# "outlook login" and "outlook account add" always show the browser window.
 browser:
-  headless: false
+  headless: false  # set to true to refresh the token without opening a window
   timeout: 120  # seconds to wait for login
 
 # Output format (table or json)
