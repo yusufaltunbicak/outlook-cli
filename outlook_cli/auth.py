@@ -19,6 +19,11 @@ from .exceptions import AccountError, AuthRequiredError, TokenExpiredError
 TOKEN_STORAGE_BACKEND = "keyring"
 TOKEN_STORAGE_VERSION = 1
 
+# A headless capture only has to wait for OWA to authenticate itself with the saved
+# cookies, so it must not stall a running command for as long as an interactive login.
+HEADLESS_CAPTURE_TIMEOUT = 30
+HEADED_CAPTURE_TIMEOUT = 120
+
 
 def get_token(account_name: str | None = None) -> str:
     """Return a valid bearer token for the selected account."""
@@ -44,6 +49,7 @@ def login(
     account_name: str | None = None,
     allow_create: bool = False,
     token: str | None = None,
+    headless: bool | None = None,
 ) -> str:
     """Authenticate and cache a bearer token.
 
@@ -53,6 +59,9 @@ def login(
         account_name: Account profile name
         allow_create: Allow creating new account profile
         token: Pre-fetched bearer token (skips browser if provided)
+        headless: Browser mode. None resolves it from the account's browser.headless
+            config, which is what the automatic token refresh does; interactive logins
+            pass False to force a visible window.
 
     Returns:
         Valid bearer token
@@ -78,10 +87,22 @@ def login(
     if not allow_create:
         account_service.ensure_account_known(selected)
 
+    use_headless = _resolve_headless(selected, headless)
+
     paths = account_service.get_account_paths(selected)
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     if not paths.uses_legacy_default:
         paths.config_dir.mkdir(parents=True, exist_ok=True)
+
+    # A headless capture depends entirely on the saved OWA cookies: without them the page
+    # stops at the Microsoft login form and no bearer token is ever issued. Bail out now
+    # instead of burning the whole capture timeout on a hopeless attempt.
+    if use_headless and not paths.browser_state_file.exists():
+        raise AuthRequiredError(
+            f"No saved browser session for account '{selected}'.\n"
+            "A headless token refresh needs an existing OWA session.\n"
+            "Run: outlook login"
+        )
 
     captured_token: list[str] = []
     seen_urls: list[str] = []
@@ -103,23 +124,28 @@ def login(
         if paths.browser_state_file.exists() and not force:
             launch_args["storage_state"] = str(paths.browser_state_file)
 
-        browser = p.chromium.launch(headless=False)
+        browser = p.chromium.launch(headless=use_headless)
         context = browser.new_context(user_agent=USER_AGENT, **launch_args)
         context.on("request", _intercept_request)
 
         page = context.new_page()
-        print("Opening Outlook... Log in and wait for your inbox to load.")
-        print("The browser will close automatically once the token is captured.")
+        if not use_headless:
+            print("Opening Outlook... Log in and wait for your inbox to load.")
+            print("The browser will close automatically once the token is captured.")
         page.goto(OWA_URL, wait_until="domcontentloaded")
 
-        deadline = time.time() + 120
+        # OWA does not reliably issue an authenticated API call on its own, so nudge it
+        # with a fetch. Headed logins get a grace period to let the user finish signing
+        # in; headless has nobody to wait for, so it nudges as soon as the page loads.
+        nudge_at = time.time() + (0 if use_headless else 25)
+        deadline = time.time() + (HEADLESS_CAPTURE_TIMEOUT if use_headless else HEADED_CAPTURE_TIMEOUT)
         while not captured_token and time.time() < deadline:
             try:
                 page.wait_for_timeout(2000)
             except Exception:
                 break
 
-            if not captured_token and time.time() > deadline - 95:
+            if not captured_token and time.time() > nudge_at:
                 try:
                     page.evaluate(
                         """
@@ -145,6 +171,12 @@ def login(
         print(f"\n  [debug] Total requests with Bearer: {len(seen_urls)}")
 
     if not captured_token:
+        if use_headless:
+            raise AuthRequiredError(
+                f"Could not refresh the token for account '{selected}' without a browser window.\n"
+                "The saved OWA session has most likely expired.\n"
+                "Run: outlook login"
+            )
         raise AuthRequiredError(
             "Could not capture bearer token.\n"
             "Make sure you logged in and your inbox fully loaded.\n"
@@ -158,6 +190,14 @@ def login(
     mailbox_info = account_service.bind_account(selected, me)
     _save_token(token, selected, mailbox_info)
     return token
+
+
+def _resolve_headless(account_name: str, headless: bool | None) -> bool:
+    """Resolve the browser mode: an explicit argument wins over the account config."""
+    if headless is not None:
+        return headless
+    browser_cfg = account_service.load_account_config(account_name).get("browser", {})
+    return bool(browser_cfg.get("headless", False))
 
 
 def _pick_best_token(tokens: list[str], debug: bool = False) -> str:

@@ -26,7 +26,7 @@ def add_account(name: str):
     if normalized in registry.get("accounts", {}):
         raise AccountError(f"Account profile '{normalized}' already exists.")
 
-    do_login(account_name=normalized, allow_create=True)
+    do_login(account_name=normalized, allow_create=True, headless=False)
     print_success(f"Account profile '{normalized}' added.")
 
 

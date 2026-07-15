@@ -428,10 +428,13 @@ default_folder: Inbox
 default_signature: null       # set to signature name for auto-append
 timezone: UTC                 # output timezone for calendar commands (UTC, UTC+8, Asia/Shanghai)
 browser:
-  headless: false
+  headless: false             # headless applies to the automatic token refresh only
   timeout: 120
 output_format: table
 ```
+
+Set `browser.headless: true` to make the automatic token refresh reuse the saved OWA
+session without opening a browser window.
 
 Per-profile overrides are loaded from `~/.config/outlook-cli/accounts/<profile>/config.yaml` and are deep-merged on top of the global config.
 
