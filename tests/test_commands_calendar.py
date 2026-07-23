@@ -45,6 +45,28 @@ def test_calendar_command_outputs_json(runner, tty_mode, monkeypatch, make_event
     assert payload["data"][0]["subject"] == "Standup"
 
 
+def test_calendar_command_converts_table_times_to_requested_timezone(runner, tty_mode, monkeypatch, make_event):
+    fake_client = type("Client", (), {})()
+    fake_client.get_calendar_view = lambda **_kwargs: [make_event()]
+    monkeypatch.setattr(calendar_cmd, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(calendar_cmd.calendar, ["--days", "1", "--timezone", "UTC+2"])
+
+    assert result.exit_code == 0
+    assert "12:00-13:00" in result.output
+
+
+def test_event_command_converts_table_times_to_requested_timezone(runner, tty_mode, monkeypatch, make_event):
+    fake_client = type("Client", (), {})()
+    fake_client.get_event = lambda _event_id: make_event()
+    monkeypatch.setattr(calendar_cmd, "_get_client", lambda: fake_client)
+
+    result = runner.invoke(calendar_cmd.event, ["1", "--timezone", "UTC+2"])
+
+    assert result.exit_code == 0
+    assert "2026-03-17 12:00" in result.output
+
+
 def test_event_create_builds_recurrence_and_calls_client(runner, tty_mode, monkeypatch, make_event):
     fake_client = type("Client", (), {})()
     seen = {}
