@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +74,26 @@ def test_local_research_commands_need_no_auth_network_or_browser(runner, mailbox
         assert all("body" not in row for row in payload["data"])
         assert all(len(row["snippet"]) < 260 for row in payload["data"])
         assert any("[[" in row["highlighted"] for row in payload["data"])
+
+
+def test_research_reads_continue_while_sync_holds_a_write_transaction(runner, mailbox_store):
+    path, _ = mailbox_store
+    writer = sqlite3.connect(path)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        payload = parsed(runner.invoke(cli, ["local", "search", "toplanti", "--json"]))
+        assert {row["id"] for row in payload["data"]} == {"message-a", "message-b"}
+        assert parsed(runner.invoke(cli, ["local", "status", "--json"]))["data"]["complete"] is True
+    finally:
+        writer.rollback()
+        writer.close()
+
+
+def test_missing_store_query_does_not_create_an_empty_mail_database(runner):
+    path = local_cmd.store_path("default")
+    result = runner.invoke(cli, ["local", "search", "toplanti", "--json"])
+    assert result.exit_code == 5
+    assert not path.exists()
 
 
 def test_compound_turkish_query_and_selected_output_fields(runner, mailbox_store):

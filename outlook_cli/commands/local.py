@@ -10,7 +10,12 @@ import click
 import httpx
 
 from .. import account
-from ..exceptions import OutlookCliError, RateLimitError, error_code_for_exception
+from ..exceptions import (
+    OutlookCliError,
+    RateLimitError,
+    ResourceNotFoundError,
+    error_code_for_exception,
+)
 from ..graph import GraphReader
 from ..locking import file_lock
 from ..mail_store import MailStore
@@ -31,7 +36,10 @@ def store_path(profile):
 
 
 def _store(account_name):
-    return MailStore(store_path(account.resolve_account_name(account_name)))
+    path = store_path(account.resolve_account_name(account_name))
+    if not path.exists():
+        raise ResourceNotFoundError("No local mail store; run local sync first.")
+    return MailStore(path, readonly=True)
 
 
 def discover_folders(reader):
