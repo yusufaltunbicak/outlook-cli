@@ -28,6 +28,7 @@ from .commands import (
     summary as summary_mod,
     diagnostics as diagnostics_mod,
     index as index_mod,
+    local as local_mod,
 )
 from .formatter import console
 
@@ -149,6 +150,7 @@ cli.add_command(diagnostics_mod.schema)
 cli.add_command(diagnostics_mod.doctor)
 cli.add_command(index_mod.index)
 cli.add_command(index_mod.graph_login)
+cli.add_command(local_mod.local)
 
 # Auth
 cli.add_command(auth_mod.login)

@@ -42,6 +42,10 @@ class TokenExpiredError(OutlookCliError):
 class RateLimitError(OutlookCliError):
     """429 — API rate limit hit after max retries."""
 
+    def __init__(self, message, *, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
 
 class ResourceNotFoundError(OutlookCliError):
     """Folder, calendar, category, signature, or message not found."""
