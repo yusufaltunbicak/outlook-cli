@@ -8,8 +8,7 @@ Read-only smoke run:
 Read-only smoke run with explicit token:
   OUTLOOK_RUN_SMOKE=1 OUTLOOK_TOKEN=... pytest -m smoke -q
 
-Optional write smoke (draft create + delete only):
-  OUTLOOK_RUN_SMOKE=1 OUTLOOK_SMOKE_ALLOW_WRITE=1 pytest -m smoke -q
+Mailbox mutations are tested only with mocks in the unit suite.
 """
 
 from __future__ import annotations
@@ -86,24 +85,3 @@ def test_smoke_schedule_list(live_client: OutlookClient):
         assert "scheduled_at" in entry
 
 
-def test_smoke_draft_create_and_delete(live_client: OutlookClient):
-    if os.environ.get("OUTLOOK_SMOKE_ALLOW_WRITE") != "1":
-        pytest.skip("Set OUTLOOK_SMOKE_ALLOW_WRITE=1 to enable reversible draft write smoke.")
-
-    me = live_client.get_me()
-    address = me.get("EmailAddress")
-    if not address:
-        pytest.skip("Current account email could not be resolved.")
-
-    subject = f"outlook-cli smoke draft {datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    draft = live_client.create_draft(
-        to=[address],
-        subject=subject,
-        body="Smoke test draft. Safe to delete.",
-    )
-
-    try:
-        assert draft.id
-        assert draft.subject == subject
-    finally:
-        live_client.delete_message(draft.id)

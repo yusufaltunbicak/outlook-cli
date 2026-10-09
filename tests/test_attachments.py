@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import base64
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from outlook_cli.client import OutlookClient
 from outlook_cli.constants import ATTACHMENT_SIZE_THRESHOLD
-
 
 # ── Fixtures ──────────────────────────────────────────────
 
@@ -98,7 +95,7 @@ class TestAddAttachmentLarge:
         file_size = large_file.stat().st_size
 
         with patch.object(client, "_post", return_value={"uploadUrl": "https://upload.example.com/session"}) as mock_post, \
-             patch("outlook_cli.client.httpx.put", return_value=MagicMock(status_code=200, content=b'{}', json=lambda: {})) as mock_put, \
+             patch("outlook_cli.client.httpx.Client.request", return_value=MagicMock(status_code=200, content=b'{}', json=lambda: {})) as mock_put, \
              patch.object(client, "_save_id_map"):
             client.add_attachment(FAKE_MSG_ID, str(large_file))
 
@@ -127,7 +124,7 @@ class TestAddAttachmentLarge:
         ]
 
         with patch.object(client, "_post", return_value={"uploadUrl": "https://upload.example.com/session"}), \
-             patch("outlook_cli.client.httpx.put", side_effect=put_responses) as mock_put, \
+             patch("outlook_cli.client.httpx.Client.request", side_effect=put_responses) as mock_put, \
              patch.object(client, "_save_id_map"):
             client.add_attachment(FAKE_MSG_ID, str(f))
 
@@ -232,7 +229,7 @@ class TestAttachmentThreshold:
         f.write_bytes(b"\x00" * ATTACHMENT_SIZE_THRESHOLD)
 
         with patch.object(client, "_post", return_value={"uploadUrl": "https://upload.example.com/session"}) as mock_post, \
-             patch("outlook_cli.client.httpx.put", return_value=MagicMock(status_code=200, content=b'{}', json=lambda: {})), \
+             patch("outlook_cli.client.httpx.Client.request", return_value=MagicMock(status_code=200, content=b'{}', json=lambda: {})), \
              patch.object(client, "_save_id_map"):
             client.add_attachment(FAKE_MSG_ID, str(f))
 

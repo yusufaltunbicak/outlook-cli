@@ -6,8 +6,8 @@ import json
 from unittest.mock import MagicMock
 
 from outlook_cli import cli as cli_module
-from outlook_cli.commands import mail, schedule
 from outlook_cli import signature_manager
+from outlook_cli.commands import mail, schedule
 
 
 def test_send_with_attachments_uses_draft_flow(runner, tty_mode, monkeypatch, tmp_path, make_email):
@@ -17,7 +17,7 @@ def test_send_with_attachments_uses_draft_flow(runner, tty_mode, monkeypatch, tm
     fake_client.create_draft.return_value = make_email(id="draft-1")
     monkeypatch.setattr(mail, "_get_client", lambda: fake_client)
     monkeypatch.setitem(mail.cfg, "default_signature", "default")
-    monkeypatch.setattr(signature_manager, "get_signature", lambda name: "<b>sig</b>")
+    monkeypatch.setattr(signature_manager, "get_signature", lambda name, **kwargs: "<b>sig</b>")
     monkeypatch.setattr(signature_manager, "append_signature", lambda body, sig, is_html: ("Body+Sig", True))
 
     result = runner.invoke(
@@ -248,8 +248,8 @@ def test_schedule_cancel_reports_invalid_index(runner, tty_mode, monkeypatch):
 
     result = runner.invoke(schedule.schedule_cancel, ["3", "-y"])
 
-    assert result.exit_code == 0
-    assert errors == ["Invalid index #3. Run 'outlook schedule-list' to see entries."]
+    assert result.exit_code == 2
+    assert "Invalid index #3. Run 'outlook schedule-list' to see entries." in result.output
     fake_client.cancel_scheduled_entry.assert_not_called()
 
 

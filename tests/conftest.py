@@ -1,12 +1,66 @@
 from __future__ import annotations
 
+import socket
 from datetime import datetime, timezone
 
+import httpx
+import keyring
 import pytest
 from click.testing import CliRunner
 
+from outlook_cli import account, config, constants, credentials
 from outlook_cli.commands import _common as common
 from outlook_cli.models import Attachment, Contact, Email, EmailAddress, Event, Folder
+
+
+@pytest.fixture(autouse=True)
+def offline_unit_environment(monkeypatch, tmp_path, request):
+    """Unit tests cannot touch a real mailbox, credential store or local cache.
+
+    Tests replace the blocked boundary explicitly when a fake transport,
+    browser or keyring is part of the scenario. Live smoke tests remain a
+    separate, explicitly selected read-only suite.
+    """
+    if request.node.get_closest_marker("smoke"):
+        return
+
+    def denied(*_args, **_kwargs):
+        raise AssertionError("Live network, browser and keychain access is forbidden in unit tests")
+
+    cache_root = tmp_path / "isolated-cache"
+    config_root = tmp_path / "isolated-config"
+    paths = {
+        "CACHE_DIR": cache_root,
+        "CONFIG_DIR": config_root,
+        "TOKEN_FILE": cache_root / "token.json",
+        "BROWSER_STATE_FILE": cache_root / "browser-state.json",
+        "ID_MAP_FILE": cache_root / "id_map.json",
+        "SCHEDULED_FILE": cache_root / "scheduled.json",
+        "SIGNATURES_DIR": config_root / "signatures",
+        "CONFIG_FILE": config_root / "config.yaml",
+        "ACCOUNTS_FILE": config_root / "accounts.json",
+        "ACCOUNTS_CACHE_DIR": cache_root / "accounts",
+        "ACCOUNTS_CONFIG_DIR": config_root / "accounts",
+    }
+    for module in (constants, account, config):
+        for name, value in paths.items():
+            if hasattr(module, name):
+                monkeypatch.setattr(module, name, value)
+    monkeypatch.setenv("OUTLOOK_CLI_CACHE", str(cache_root))
+    monkeypatch.setenv("OUTLOOK_CLI_CONFIG", str(config_root))
+    for name in ("OUTLOOK_TOKEN", "OUTLOOK_ACCOUNT", "OUTLOOK_GRAPH_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(common, "_client_cache", {})
+    monkeypatch.setattr(common.cfg, "_overrides", {})
+    monkeypatch.setattr(socket.socket, "connect", denied)
+    monkeypatch.setattr(socket.socket, "connect_ex", denied)
+    monkeypatch.setattr(httpx.Client, "send", denied)
+    monkeypatch.setattr(httpx.AsyncClient, "send", denied)
+    for name in ("get_password", "set_password", "delete_password"):
+        monkeypatch.setattr(keyring, name, denied)
+    monkeypatch.setattr(credentials, "_native_call", denied)
+    from playwright import sync_api
+    monkeypatch.setattr(sync_api, "sync_playwright", denied)
 
 
 class DummyResponse:

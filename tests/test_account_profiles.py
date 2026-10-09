@@ -10,6 +10,7 @@ import pytest
 from outlook_cli import account as account_service
 from outlook_cli import auth as auth_mod
 from outlook_cli import client as client_mod
+from outlook_cli import credentials
 from outlook_cli import signature_manager as signature_manager_mod
 from outlook_cli.account import AccountPaths
 from outlook_cli.client import OutlookClient
@@ -119,11 +120,14 @@ def test_remove_account_deletes_stored_keyring_token(monkeypatch, tmp_path):
     paths.cache_dir.mkdir(parents=True, exist_ok=True)
     paths.config_dir.mkdir(parents=True, exist_ok=True)
     deleted = []
-    monkeypatch.setattr(auth_mod, "delete_stored_token", lambda name=None: deleted.append(name))
+    monkeypatch.setattr(auth_mod, "delete_stored_token", lambda name=None, **kwargs: deleted.append(name))
+    graph_deleted = []
+    monkeypatch.setattr(credentials, "delete_password", lambda service, name, **kwargs: graph_deleted.append(name))
 
     account_service.remove_account("work")
 
     assert deleted == ["work"]
+    assert graph_deleted == ["work"]
 
 
 def test_load_account_config_merges_global_and_profile_overrides(monkeypatch, tmp_path):
@@ -178,15 +182,15 @@ def test_profile_scoped_id_maps_and_schedules_are_isolated(monkeypatch, tmp_path
     work = OutlookClient("token", account_name="work")
     personal = OutlookClient("token", account_name="personal")
 
-    work._id_map = {"1": "work-id"}
-    work._save_id_map()
-    personal._id_map = {"1": "personal-id"}
-    personal._save_id_map()
+    work._store().allocate(["work-id"])
+    personal._store().allocate(["personal-id"])
 
     work._save_scheduled([{"subject": "Work", "scheduled_at": "2026-03-17T10:00:00Z"}])
     personal._save_scheduled([{"subject": "Personal", "scheduled_at": "2026-03-17T11:00:00Z"}])
 
-    assert json.loads(path_map["work"].id_map_file.read_text()) == {"1": "work-id"}
-    assert json.loads(path_map["personal"].id_map_file.read_text()) == {"1": "personal-id"}
+    assert work._id_store.snapshot() == {"1": "work-id"}
+    assert personal._id_store.snapshot() == {"1": "personal-id"}
+    assert path_map["work"].id_map_file.with_suffix(".sqlite3").exists()
+    assert path_map["personal"].id_map_file.with_suffix(".sqlite3").exists()
     assert work._load_scheduled()[0]["subject"] == "Work"
     assert personal._load_scheduled()[0]["subject"] == "Personal"

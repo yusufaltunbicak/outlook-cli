@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import click
@@ -13,11 +12,15 @@ from outlook_cli import cli as cli_module
 from outlook_cli.commands import _common as common
 from outlook_cli.commands import manage, schedule
 from outlook_cli.config import DEFAULTS, _deep_merge, load_config
-from outlook_cli.exceptions import AuthRequiredError, ResourceNotFoundError, TokenExpiredError
+from outlook_cli.exceptions import (
+    AuthRequiredError,
+    ResourceNotFoundError,
+    TokenExpiredError,
+)
 
 
 class FakeOutlookClient:
-    def __init__(self, token: str, account_name: str | None = None):
+    def __init__(self, token: str, account_name: str | None = None, **kwargs):
         self.token = token
         self.account_name = account_name
 
@@ -123,28 +126,22 @@ def test_wants_json_respects_pipe(monkeypatch):
     assert common._wants_json(False) is True
 
 
-def test_handle_api_error_retries_after_relogin(monkeypatch, runner, tty_mode):
-    common._client_cache = {"default": object()}
+def test_handle_api_error_never_replays_command_after_expiry(monkeypatch, runner, tty_mode):
     state = {"calls": 0}
-    success_messages = []
-    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
-    monkeypatch.setattr(common, "print_success", lambda msg: success_messages.append(msg))
+    login = MagicMock(return_value="new-token")
+    monkeypatch.setattr(common, "do_login", login)
 
     @click.command()
-    @click.option("--json", "as_json", is_flag=True)
     @common._handle_api_error
-    def cmd(as_json: bool):
+    def cmd():
         state["calls"] += 1
-        if state["calls"] == 1:
-            raise TokenExpiredError("expired")
-        click.echo("retried")
+        raise TokenExpiredError("expired after a previous mutation")
 
     result = runner.invoke(cmd, [])
 
-    assert result.exit_code == 0
-    assert state["calls"] == 2
-    assert common._client_cache == {}
-    assert success_messages == ["Re-login successful. Retrying..."]
+    assert result.exit_code == 4
+    assert state["calls"] == 1
+    login.assert_not_called()
 
 
 def test_handle_api_error_returns_json_envelope(monkeypatch, runner, tty_mode):
@@ -163,82 +160,41 @@ def test_handle_api_error_returns_json_envelope(monkeypatch, runner, tty_mode):
     assert payload["error"]["message"] == "missing message"
 
 
-def test_handle_api_error_reports_failed_relogin(monkeypatch, runner, tty_mode):
-    monkeypatch.setattr(common, "do_login", lambda **kwargs: (_ for _ in ()).throw(RuntimeError("nope")))
+@pytest.mark.parametrize("piped,explicit", [(False, True), (True, False)])
+def test_handle_api_error_expiry_emits_single_error_payload(monkeypatch, runner, piped, explicit):
+    state = {"calls": 0}
+    login = MagicMock()
+    monkeypatch.setattr(common, "_is_piped", lambda: piped)
+    monkeypatch.setattr(common, "do_login", login)
 
     @click.command()
     @click.option("--json", "as_json", is_flag=True)
     @common._handle_api_error
-    def cmd(as_json: bool):
+    def cmd(as_json):
+        state["calls"] += 1
         raise TokenExpiredError("expired")
 
-    result = runner.invoke(cmd, ["--json"])
+    result = runner.invoke(cmd, ["--json"] if explicit else [])
 
     assert result.exit_code == 4
+    assert state["calls"] == 1
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
-    assert payload["error"]["code"] == "auth_failed"
-    assert "Token expired. Attempting re-login..." in result.stderr
-
-
-def test_handle_api_error_json_retry_keeps_stdout_single_payload(monkeypatch, runner, tty_mode):
-    common._client_cache = {"default": object()}
-    state = {"calls": 0}
-    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
-
-    @click.command()
-    @click.option("--json", "as_json", is_flag=True)
-    @common._handle_api_error
-    def cmd(as_json: bool):
-        state["calls"] += 1
-        if state["calls"] == 1:
-            raise TokenExpiredError("expired")
-        click.echo(common.to_json_envelope({"status": "ok"}))
-
-    result = runner.invoke(cmd, ["--json"])
-
-    assert result.exit_code == 0
-    assert state["calls"] == 2
-    payload = json.loads(result.stdout)
-    assert payload["ok"] is True
-    assert payload["data"]["status"] == "ok"
-    assert result.stderr.count("Token expired. Attempting re-login...") == 1
-    assert result.stderr.count("Re-login successful. Retrying...") == 1
-
-
-def test_handle_api_error_pipe_mode_retry_keeps_stdout_single_payload(monkeypatch, runner):
-    common._client_cache = {"default": object()}
-    state = {"calls": 0}
-    monkeypatch.setattr(common, "_is_piped", lambda: True)
-    monkeypatch.setattr(common, "do_login", lambda **kwargs: "new-token")
-
-    @click.command()
-    @common._handle_api_error
-    def cmd():
-        state["calls"] += 1
-        if state["calls"] == 1:
-            raise TokenExpiredError("expired")
-        click.echo(common.to_json_envelope({"status": "ok"}))
-
-    result = runner.invoke(cmd, [])
-
-    assert result.exit_code == 0
-    payload = json.loads(result.stdout)
-    assert payload["ok"] is True
-    assert payload["data"]["status"] == "ok"
-    assert "Token expired. Attempting re-login..." in result.stderr
+    assert payload["error"]["code"] == "session_expired"
+    login.assert_not_called()
 
 
 def test_check_token_expiry_json_mode_writes_status_to_stderr(monkeypatch, capsys):
     monkeypatch.setattr(common, "_is_json_mode", lambda: True)
     monkeypatch.setattr(common, "_decode_exp", lambda token: 0)
-    monkeypatch.delenv("OUTLOOK_TOKEN", raising=False)
-    monkeypatch.setattr(common, "do_login", lambda **kwargs: "fresh-token")
+    refresh = MagicMock(return_value="fresh-token")
+    monkeypatch.setattr(common, "auth_refresh_token", refresh)
 
     token = common._check_token_expiry("stale-token", "default")
 
     captured = capsys.readouterr()
     assert token == "fresh-token"
+    refresh.assert_called_once_with("stale-token", "default", allow_interactive=True)
     assert captured.out == ""
     assert "Token expiring soon. Re-authenticating..." in captured.err
 

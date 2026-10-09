@@ -68,7 +68,7 @@ def test_account_current_outputs_json(runner, tty_mode, monkeypatch):
 def test_account_remove_deletes_profile(runner, tty_mode, monkeypatch):
     calls = []
     messages = []
-    monkeypatch.setattr(account_cmd.account_service, "remove_account", lambda name: calls.append(name))
+    monkeypatch.setattr(account_cmd.account_service, "remove_account", lambda name, **kwargs: calls.append(name))
     monkeypatch.setattr(account_cmd, "print_success", lambda msg: messages.append(msg))
 
     result = runner.invoke(account_cmd.account, ["remove", "work", "-y"])

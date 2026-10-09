@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
 
 from outlook_cli import category_manager as cm
-from outlook_cli.exceptions import ResourceNotFoundError, TokenExpiredError
+from outlook_cli.exceptions import (
+    PartialFailureError,
+    ResourceNotFoundError,
+    TokenExpiredError,
+)
 
 
 class _Resp:
@@ -16,6 +21,7 @@ class _Resp:
         self.status_code = status_code
         self._payload = payload or {}
         self.headers = headers or {}
+        self.content = b"{}"
 
     def json(self) -> dict:
         return self._payload
@@ -29,20 +35,20 @@ class _Resp:
 
 def test_owa_request_sends_payload_in_header(monkeypatch):
     post = MagicMock(return_value=_Resp(payload={"ok": True}))
-    monkeypatch.setattr(cm.httpx, "post", post)
+    monkeypatch.setattr(cm.httpx.Client, "request", post)
 
     result = cm._owa_request("token", "TestAction", {"a": 1})
 
     assert result == {"ok": True}
     kwargs = post.call_args.kwargs
-    assert kwargs["headers"]["Authorization"] == "Bearer token"
+    assert post.call_args.args[0] == "POST"
     assert kwargs["headers"]["Action"] == "TestAction"
     assert "x-owa-urlpostdata" in kwargs["headers"]
     assert kwargs["content"] == b""
 
 
 def test_owa_request_raises_for_expired_token(monkeypatch):
-    monkeypatch.setattr(cm.httpx, "post", lambda *_args, **_kwargs: _Resp(status_code=401))
+    monkeypatch.setattr(cm.httpx.Client, "request", lambda *_args, **_kwargs: _Resp(status_code=401))
 
     with pytest.raises(TokenExpiredError):
         cm._owa_request("token", "TestAction", {})
@@ -98,7 +104,7 @@ def test_rename_category_can_skip_message_propagation(monkeypatch):
     bulk.assert_not_called()
 
 
-def test_bulk_rename_retries_on_429_and_timeouts(monkeypatch):
+def test_bulk_rename_retries_rejection_but_checkpoints_ambiguous_write(monkeypatch):
     sleeps = []
     monkeypatch.setattr(cm.time, "sleep", lambda seconds: sleeps.append(seconds))
 
@@ -124,17 +130,25 @@ def test_bulk_rename_retries_on_429_and_timeouts(monkeypatch):
                 raise response
             return response
 
+        def request(self, method, url, **kwargs):
+            if method == "GET":
+                return self.get(url, params=kwargs.get("params"))
+            assert method == "PATCH"
+            return self.patch(url, json=kwargs.get("json"))
+
         def close(self):
             return None
 
     fake_client = FakeClient()
     monkeypatch.setattr(cm.httpx, "Client", lambda *args, **kwargs: fake_client)
 
-    count = cm._bulk_rename_on_messages("token", "Old", "New")
+    with pytest.raises(PartialFailureError) as error:
+        cm._bulk_rename_on_messages("token", "Old", "New")
 
-    assert count == 1
+    assert Path(error.value.checkpoint).exists()
+    assert len(fake_client.patch_calls) == 1
     assert fake_client.patch_calls[-1][1] == {"Categories": ["New", "Other"]}
-    assert sleeps == [1, 3]
+    assert sleeps == [1]
 
 
 def test_clear_category_honors_folder_and_max_messages(monkeypatch):
@@ -152,6 +166,12 @@ def test_clear_category_honors_folder_and_max_messages(monkeypatch):
         def patch(self, url, json=None):
             self.patch_calls.append((url, json))
             return _Resp(payload={})
+
+        def request(self, method, url, **kwargs):
+            if method == "GET":
+                return self.get(url, params=kwargs.get("params"))
+            assert method == "PATCH"
+            return self.patch(url, json=kwargs.get("json"))
 
         def close(self):
             return None

@@ -8,7 +8,11 @@ import httpx
 import pytest
 
 from outlook_cli.client import OutlookClient
-from outlook_cli.exceptions import RateLimitError, ResourceNotFoundError, TokenExpiredError
+from outlook_cli.exceptions import (
+    RateLimitError,
+    ResourceNotFoundError,
+    TokenExpiredError,
+)
 
 
 class _Resp:
@@ -53,7 +57,7 @@ def test_request_retries_on_429_then_succeeds(client, monkeypatch):
     ])
     sleeps = []
     monkeypatch.setattr(client._client, "request", lambda *_args, **_kwargs: next(responses))
-    monkeypatch.setattr("outlook_cli.client.time.sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr("outlook_cli.transport.time.sleep", lambda seconds: sleeps.append(seconds))
 
     result = client._request("GET", "/messages")
 
@@ -61,9 +65,9 @@ def test_request_retries_on_429_then_succeeds(client, monkeypatch):
     assert sleeps == [1]
 
 
-def test_request_raises_rate_limit_after_three_retries(client, monkeypatch):
+def test_request_raises_rate_limit_after_bounded_retries(client, monkeypatch):
     monkeypatch.setattr(client._client, "request", lambda *_args, **_kwargs: _Resp(status_code=429, headers={"Retry-After": "1"}))
-    monkeypatch.setattr("outlook_cli.client.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr("outlook_cli.transport.time.sleep", lambda *_args, **_kwargs: None)
 
     with pytest.raises(RateLimitError):
         client._request("GET", "/messages")
@@ -129,7 +133,7 @@ def test_get_open_target_raises_generic_missing_item_error(client):
         client.get_open_target("99")
 
 
-def test_assign_display_nums_reuses_existing_and_evicts_old_entries(client, monkeypatch, make_email):
+def test_assign_display_nums_reuses_existing_and_preserves_old_entries(client, monkeypatch, make_email):
     client.MAX_ID_MAP_SIZE = 2
     client._id_map = {"1": "existing-id"}
     client._next_num = 2
@@ -146,8 +150,7 @@ def test_assign_display_nums_reuses_existing_and_evicts_old_entries(client, monk
     assert messages[0].display_num == 1
     assert messages[1].display_num == 2
     assert messages[2].display_num == 3
-    assert "1" not in client._id_map
-    assert client._id_map == {"2": "new-1", "3": "new-2"}
+    assert client._id_map == {"1": "existing-id", "2": "new-1", "3": "new-2"}
 
 
 def test_get_messages_with_no_category_overfetches_until_top(client, monkeypatch):
@@ -214,17 +217,17 @@ def test_get_messages_uses_folder_scoped_search_for_text_filters(client, monkeyp
     ]
 
 
-def test_schedule_send_tracks_entry(client, monkeypatch):
-    send_mail = MagicMock()
-    track = MagicMock(return_value={"subject": "Planned"})
-    monkeypatch.setattr(client, "send_mail", send_mail)
-    monkeypatch.setattr(client, "_track_scheduled", track)
+def test_schedule_send_creates_draft_then_tracks_exact_identity(client, monkeypatch, make_email):
+    create = MagicMock(return_value=make_email(id="draft-id"))
+    schedule = MagicMock(return_value={"message_id": "draft-id", "tracking_id": "track-1"})
+    monkeypatch.setattr(client, "create_draft", create)
+    monkeypatch.setattr(client, "schedule_draft", schedule)
 
     result = client.schedule_send(["a@example.com"], "Planned", "Body", "2026-03-20T10:00:00Z")
 
-    assert result == {"subject": "Planned"}
-    send_mail.assert_called_once()
-    track.assert_called_once_with(to=["a@example.com"], cc=None, subject="Planned", send_at="2026-03-20T10:00:00Z")
+    assert result["message_id"] == "draft-id"
+    create.assert_called_once_with(to=["a@example.com"], subject="Planned", body="Body", cc=None, html=False)
+    schedule.assert_called_once_with("draft-id", "2026-03-20T10:00:00Z")
 
 
 def test_schedule_draft_patches_sends_and_tracks(client, monkeypatch):
@@ -240,14 +243,14 @@ def test_schedule_draft_patches_sends_and_tracks(client, monkeypatch):
     )
     patch = MagicMock(return_value={"Id": "updated-id"})
     post = MagicMock(return_value={})
-    track = MagicMock(return_value={"message_id": "updated-id"})
+    track = MagicMock(return_value={"message_id": "updated-id", "tracking_id": "track-1"})
     monkeypatch.setattr(client, "_patch", patch)
     monkeypatch.setattr(client, "_post", post)
     monkeypatch.setattr(client, "_track_scheduled", track)
 
     result = client.schedule_draft("7", "2026-03-20T10:00:00Z")
 
-    assert result == {"message_id": "updated-id"}
+    assert result == {"message_id": "updated-id", "tracking_id": "track-1", "status": "scheduled"}
     patch.assert_called_once()
     post.assert_called_once_with("/messages/updated-id/send")
     track.assert_called_once_with(
@@ -256,10 +259,12 @@ def test_schedule_draft_patches_sends_and_tracks(client, monkeypatch):
         subject="Draft subject",
         send_at="2026-03-20T10:00:00Z",
         message_id="updated-id",
+        internet_message_id=None,
+        status="send_pending",
     )
 
 
-def test_get_scheduled_list_enriches_entries_with_draft_ids(client, monkeypatch):
+def test_get_scheduled_list_does_not_guess_legacy_identity(client, monkeypatch):
     monkeypatch.setattr(client, "_load_scheduled", lambda: [{"subject": "Draft A", "scheduled_at": "x"}])
     monkeypatch.setattr(
         client,
@@ -269,11 +274,14 @@ def test_get_scheduled_list_enriches_entries_with_draft_ids(client, monkeypatch)
 
     entries = client.get_scheduled_list()
 
-    assert entries[0]["message_id"] == "draft-1"
+    assert "message_id" not in entries[0]
+    assert entries[0]["cancellable"] is False
+    assert entries[0]["status"] == "identity_unavailable"
 
 
 def test_cancel_scheduled_entry_removes_local_and_server_copy(client, monkeypatch):
-    local_entries = [{"subject": "A", "scheduled_at": "x"}]
+    local_entries = [{"subject": "A", "scheduled_at": "x", "message_id": "draft-1", "tracking_id": "track-1"}]
+    monkeypatch.setattr(client, "_get", lambda *args, **kwargs: {"IsDraft": True, "Id": "draft-1"})
     monkeypatch.setattr(client, "get_scheduled_list", lambda: [{"subject": "A", "scheduled_at": "x", "message_id": "draft-1"}])
     monkeypatch.setattr(client, "_load_scheduled", lambda: list(local_entries))
     saved = {}

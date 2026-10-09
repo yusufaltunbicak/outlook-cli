@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from io import StringIO
 from unittest.mock import MagicMock, patch
 
 from outlook_cli.formatter import print_thread
@@ -78,6 +77,7 @@ class TestGetThread:
             client._next_num = 10
 
             mock_email = _make_email("Re: Test", "Alice", 1)
+            mock_email.id = "msg_2"
             client.get_message = MagicMock(return_value=mock_email)
 
             # API returns messages from search — includes same + different conversations

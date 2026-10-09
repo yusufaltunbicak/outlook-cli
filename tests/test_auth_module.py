@@ -162,7 +162,7 @@ def _install_fake_playwright(monkeypatch, token: str | None, raise_on_wait: bool
 def test_get_token_prefers_environment(monkeypatch, tmp_path):
     _patch_account(monkeypatch, tmp_path)
     monkeypatch.setenv("OUTLOOK_TOKEN", "env-token")
-    monkeypatch.setattr(auth, "_load_cached_token", lambda: "cached-token")
+    monkeypatch.setattr(auth, "_load_cached_token", lambda *args, **kwargs: "cached-token")
     monkeypatch.setattr(auth, "login", lambda: "fresh-token")
     monkeypatch.setattr(auth, "_assert_token_matches_account", lambda *args, **kwargs: {})
 
@@ -172,7 +172,7 @@ def test_get_token_prefers_environment(monkeypatch, tmp_path):
 def test_get_token_uses_cache_before_login(monkeypatch, tmp_path):
     _patch_account(monkeypatch, tmp_path)
     monkeypatch.delenv("OUTLOOK_TOKEN", raising=False)
-    monkeypatch.setattr(auth, "_load_cached_token", lambda: "cached-token")
+    monkeypatch.setattr(auth, "_load_cached_token", lambda *args, **kwargs: "cached-token")
     monkeypatch.setattr(auth, "login", lambda: "fresh-token")
 
     assert auth.get_token() == "cached-token"
@@ -265,6 +265,7 @@ def test_load_cached_token_migrates_legacy_plaintext_token(monkeypatch, tmp_path
 def test_load_cached_token_requires_keyring_secret(monkeypatch, tmp_path):
     paths = _patch_account(monkeypatch, tmp_path)
     _patch_keyring(monkeypatch)
+    monkeypatch.setattr(auth.time, "time", lambda: 1_000)
     paths.token_file.write_text(json.dumps({"storage_backend": "keyring", "storage_version": 1, "expires_at": 2_000}))
 
     with pytest.raises(AccountError, match="not found in the keyring"):
@@ -285,13 +286,14 @@ def test_pick_best_token_prefers_working_mail_endpoint(monkeypatch):
     assert auth._pick_best_token([bad, good]) == good
 
 
-def test_pick_best_token_falls_back_to_longest_token(monkeypatch):
+def test_pick_best_token_rejects_unverified_tokens(monkeypatch):
     def fake_get(*_args, **_kwargs):
         raise auth.httpx.HTTPError("network error")
 
     monkeypatch.setattr(auth.httpx, "get", fake_get)
 
-    assert auth._pick_best_token(["short", "much-longer-token"]) == "much-longer-token"
+    with pytest.raises(AuthRequiredError, match="None of the captured tokens"):
+        auth._pick_best_token(["short", "much-longer-token"])
 
 
 def test_verify_token_handles_http_error(monkeypatch):
