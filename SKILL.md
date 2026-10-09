@@ -107,6 +107,8 @@ Never log tokens, cursors or unnecessary message content.
 Data is in profile cache `mail.sqlite3` (0600 DB/WAL/SHM, 0700 directory). It is
 not application-encrypted. `local purge -y --no-input` removes only the new store;
 the legacy index survives. Delete only when authorized. No daemon is installed.
+`local purge --include-legacy-index -y --no-input` explicitly deletes both local
+mail stores and sidecars. Never add that flag without the user's authorization.
 
 Legacy `index` commands below retain their 0.2 behavior:
 

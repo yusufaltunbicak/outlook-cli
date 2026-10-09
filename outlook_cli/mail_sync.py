@@ -14,8 +14,9 @@ from urllib.parse import quote, urlsplit
 import httpx
 
 from .constants import BASE_URL
-from .exceptions import OutlookCliError, RateLimitError, ResourceNotFoundError
-from .graph import FIELDS as GRAPH_FIELDS, GRAPH_URL, graph_to_record
+from .exceptions import OutlookCliError, ResourceNotFoundError
+from .graph import FIELDS as GRAPH_FIELDS
+from .graph import GRAPH_URL, graph_to_record
 from .models import Email
 from .pagination import validated_next_link
 from .transport import request_response
@@ -61,6 +62,40 @@ def removed_id(value):
         raise OutlookCliError("A removed message has no identity; checkpoint retained.")
     match = re.fullmatch(r"Messages\('((?:[^']|'')*)'\)", identity, re.IGNORECASE)
     return match.group(1).replace("''", "'") if match else identity
+
+
+def complete_attachments(reader, message, *, graph=False):
+    """Expanded collections can themselves paginate. Fetch metadata only."""
+    key = "attachments" if graph else "Attachments"
+    values = message.get(key)
+    link = message.get(key + "@odata.nextLink")
+    if values is None:
+        identity = message.get("id" if graph else "Id")
+        root = "/me/messages" if graph else "/messages"
+        path = f"{root}/{quote(identity, safe='')}/attachments"
+        fields = ATTACHMENT_FIELDS[0].lower() + ATTACHMENT_FIELDS[1:] if graph else ATTACHMENT_FIELDS
+        if graph:
+            fields = "id,name,size,contentType,isInline"
+        page = reader.get(path, params={"$select": fields})
+        values = page.get("value")
+        link = page.get("@odata.nextLink") or page.get("odata.nextLink")
+    if not isinstance(values, list):
+        raise OutlookCliError("Attachment metadata collection is incomplete; checkpoint retained.")
+    values = list(values)
+    seen = set()
+    for _ in range(1000):
+        if not link:
+            return {**message, key: values}
+        link = validated_next_link(link, reader.base_url + "/", reader.base_url)
+        if link in seen:
+            raise OutlookCliError("Repeated attachment continuation; checkpoint retained.")
+        seen.add(link)
+        page = reader.get(link)
+        if not isinstance(page.get("value"), list):
+            raise OutlookCliError("Invalid attachment metadata page; checkpoint retained.")
+        values.extend(page["value"])
+        link = page.get("@odata.nextLink") or page.get("odata.nextLink")
+    raise OutlookCliError("Attachment metadata page budget exceeded; checkpoint retained.")
 
 
 class RestReader:
@@ -111,7 +146,7 @@ class RestReader:
             "$select": self.fields, "$expand": f"Attachments($select={ATTACHMENT_FIELDS})"})
 
     def record(self, message):
-        return rest_record(message)
+        return rest_record(complete_attachments(self, message))
 
 
 class GraphSyncReader:
@@ -145,6 +180,7 @@ class GraphSyncReader:
             "$expand": "attachments($select=id,name,size,contentType,isInline)"})
 
     def record(self, message):
+        message = complete_attachments(self, message, graph=True)
         result = graph_to_record(message)
         def addresses(items):
             return [{"name": x.get("emailAddress", {}).get("name", ""),
@@ -162,8 +198,13 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
     """Commit one page at a time and resume an interrupted initial/delta round."""
     backend = reader.backend
     identity, name = folder["id"], folder["displayName"]
-    signature = f"text+attachments:v2:{backend}:{reader.page_size}"
+    signature = f"text+attachments:v2:{backend}"
     previous = store.folder_state(backend, identity)
+    old_signature = previous.get("options_signature", "")
+    # Page size only changes transport pacing; it must not invalidate a full
+    # checkpoint. Accept the original v2 fingerprint that included page size.
+    if old_signature.startswith(signature + ":") and old_signature.rsplit(":", 1)[-1].isdigit():
+        signature = old_signature
     pending = bool(previous.get("pending_url")) and previous.get("options_signature") == signature
     rebuild = full or (bool(previous.get("pending_full")) if pending else not previous.get("cursor")) or previous.get("options_signature") != signature
     state = store.begin_sync(backend, identity, name, full=rebuild, include_body=True,

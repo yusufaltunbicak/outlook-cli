@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from urllib.parse import quote
 
@@ -16,7 +17,13 @@ from ..mail_store import MailStore
 from ..mail_sync import GraphSyncReader, RestReader, sync_folder
 from ..pagination import Page, validated_next_link
 from ..serialization import to_json_envelope
-from ._common import _get_client, _handle_api_error, account_option, confirm_action, maybe_dry_run
+from ._common import (
+    _get_client,
+    _handle_api_error,
+    account_option,
+    confirm_action,
+    maybe_dry_run,
+)
 
 
 def store_path(profile):
@@ -123,12 +130,12 @@ def sync(backend, folders, full, page_size, interval, max_pages, as_json, accoun
             outcomes = []
             for position, folder in enumerate(selected, 1):
                 try:
-                    def progress(pages, records):
+                    def progress(pages, records, position=position):
                         if pages == 1 or pages % 10 == 0:
                             click.echo(f"Sync folder {position}/{len(selected)}: {pages} pages, {records} records", err=True)
                     outcome = sync_folder(store, reader, folder, full=full, max_pages=max_pages, on_page=progress)
                     outcomes.append({"folder_id": folder["id"], "name": folder["displayName"], **outcome})
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - return safe partial diagnostics and stop all requests
                     code = error_code_for_exception(exc)
                     # Provider exceptions can contain opaque cursor URLs. Keep diagnostics content-free.
                     status = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
@@ -299,19 +306,30 @@ def compact(as_json, account_name):
 
 @local.command("purge")
 @click.option("-y", "--yes", is_flag=True)
+@click.option("--include-legacy-index", is_flag=True, help="Explicitly remove index.sqlite3 and its sidecars too")
 @click.option("--json", "as_json", is_flag=True)
 @account_option
 @_handle_api_error
-def purge(yes, as_json, account_name):
+def purge(yes, include_legacy_index, as_json, account_name):
     """Remove the new local mail store and sidecars. Legacy index is preserved."""
     profile = account.resolve_account_name(account_name)
     path = store_path(profile)
-    maybe_dry_run("local-purge", {"path": str(path), "legacy_index_retained": True})
-    confirm_action("Delete this local mail store?", yes=yes, action="purge local mail")
-    with file_lock(path.parent / "mail-sync.lock", timeout=30):
+    legacy = path.parent / "index.sqlite3"
+    maybe_dry_run("local-purge", {"path": str(path), "legacy_index_retained": not include_legacy_index,
+                                 "legacy_path": str(legacy) if include_legacy_index else None})
+    confirm_action("Delete local mail, including the legacy index?" if include_legacy_index else "Delete this local mail store?",
+                   yes=yes, action="purge local mail")
+    with ExitStack() as locks:
+        locks.enter_context(file_lock(path.parent / "mail-sync.lock", timeout=30))
+        if include_legacy_index:
+            locks.enter_context(file_lock(path.parent / "index-sync.lock", timeout=30))
+        targets = [Path(str(base) + suffix) for base in ([path, legacy] if include_legacy_index else [path])
+                   for suffix in ("", "-wal", "-shm")]
+        if any(target.is_symlink() or (target.exists() and not target.is_file()) for target in targets):
+            raise OutlookCliError("Refusing to purge symlinks or non-regular mail-store files.")
         removed = []
-        for target in [path, Path(str(path) + "-wal"), Path(str(path) + "-shm")]:
+        for target in targets:
             if target.exists():
                 target.unlink()
                 removed.append(str(target))
-        click.echo(to_json_envelope({"removed": removed, "legacy_index_retained": True}))
+        click.echo(to_json_envelope({"removed": removed, "legacy_index_retained": not include_legacy_index}))

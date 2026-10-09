@@ -96,12 +96,15 @@ service is installed.
 outlook local compact --no-input --json      # reclaim old bodies/free pages
 outlook local purge --dry-run --json         # preview
 outlook local purge -y --no-input --json     # remove new store and sidecars
+outlook local purge --include-legacy-index -y --no-input --json  # explicit: both mail copies
 ```
 
-Purge preserves legacy `index.sqlite3`, credentials, signatures and ID maps. The
-legacy index also contains email: after authorizing its removal, deleting its
-database/WAL/SHM separately is necessary to remove every local mail copy. Retain
-it until migration review. File deletion is not cryptographic SSD/backup erasure.
+Default purge preserves legacy `index.sqlite3`, credentials, signatures and ID
+maps. The legacy index also contains email. Only the explicit
+`--include-legacy-index` flag authorizes removing both stores and their sidecars
+in one command; use it after reviewing the migration. Without `-y`, confirmation
+is required; no-input mode refuses without `-y`. File deletion is not
+cryptographic SSD/backup erasure.
 
 Import opens the legacy source read-only, retaining source coverage/freshness;
 missing bodies/attachment metadata are not invented. A following full sync

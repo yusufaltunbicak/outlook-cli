@@ -8,11 +8,9 @@ excluded from query timing. This script never synchronizes or contacts Outlook.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
 import json
 import math
 import os
-from pathlib import Path
 import re
 import shutil
 import sqlite3
@@ -21,6 +19,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import Counter
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -113,7 +113,7 @@ def measure_store(store, *, backend, repeats, limit, match_mode=None):
                     "scope_complete": bool(meta.get("complete")),
                     "result_complete": bool(meta.get("result_complete"))}
             all_times.extend(timings)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - never print potentially sensitive exception values
             item = {"query_id": f"q{position:02d}", "ok": False, "error": safe_error(exc)}
         results.append(item)
         identities.append(row_ids)
@@ -192,7 +192,7 @@ def measure_cli(executable, cache, config, *, group, backend, repeats, limit, ma
                                 "json_bytes_per_result": round(statistics.median(output_bytes) / returned[-1], 1) if returned[-1] else None,
                                 "recorded_network_requests": sum(request_counts) if all(x is not None for x in request_counts) else None})
                 all_times.extend(timings)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - content-free failure reports
             results.append({"query_id": f"q{position:02d}", "ok": False, "error": safe_error(exc)})
     return {"ok": all(row["ok"] for row in results), "latency": latency(all_times), "queries": results}
 
@@ -219,7 +219,7 @@ def ingest_sync(path, label):
         if not result["ok"]:
             result["error"] = {"code": "sync_report_incomplete"}
         return result
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - content-free failure reports
         return {"label": label, "ok": False, "error": safe_error(exc)}
 
 
@@ -283,7 +283,7 @@ def main():
                                                    repeats=args.cli_repeats, limit=args.limit, timeout=args.timeout)
                 result["new_cli"] = measure_cli(args.outlook, new_cache, config, group="local", backend=args.backend,
                                                 repeats=args.cli_repeats, limit=args.limit, match_mode=args.match, timeout=args.timeout)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - close both stores and emit content-free failure
         failures.append(safe_error(exc))
     finally:
         if legacy:

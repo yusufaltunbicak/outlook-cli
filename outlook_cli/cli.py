@@ -101,12 +101,14 @@ class OutlookGroup(click.Group):
             if standalone_mode:
                 raise SystemExit(exc.exit_code)
             raise
-        except click.Abort:
+        except click.Abort as exc:
             from .serialization import error_json
+            interrupted = isinstance(exc.__cause__, KeyboardInterrupt)
             if "--json" in args or not sys.stdout.isatty():
-                click.echo(error_json("aborted", "Operation aborted."))
+                click.echo(error_json("interrupted" if interrupted else "aborted",
+                                      "Operation interrupted; committed checkpoints retained." if interrupted else "Operation aborted."))
             if standalone_mode:
-                raise SystemExit(1)
+                raise SystemExit(130 if interrupted else 1)
             raise
         finally:
             if profile_run is not None:
