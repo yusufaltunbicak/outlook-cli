@@ -251,7 +251,8 @@ def attachments(message_id, backend, as_json, account_name):
     """List cached attachment metadata. Binary files are not fetched by sync."""
     store = _store(account_name)
     try:
-        click.echo(to_json_envelope(store.attachments(message_id, backend=backend)))
+        rows, meta = store.attachments(message_id, backend=backend, include_meta=True)
+        click.echo(to_json_envelope(Page(rows, meta=meta)))
     finally:
         store.close()
 

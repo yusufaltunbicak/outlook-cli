@@ -86,7 +86,8 @@ def _project(data, settings):
     if fields:
         return {key: data.get(key) for key in fields}
     if settings.get("view") == "compact" and "sender" in data:
-        return {key: data[key] for key in COMPACT_FIELDS if key in data}
+        fields = LOCAL_COMPACT_FIELDS if "snippet" in data else COMPACT_FIELDS
+        return {key: data[key] for key in fields if key in data}
     # Nested bulk results retain their status/error structure.
     for key in ("data", "messages", "results"):
         if key in data:
@@ -95,6 +96,7 @@ def _project(data, settings):
 
 
 COMPACT_FIELDS = ("id", "display_num", "subject", "sender", "received", "preview", "is_read", "has_attachments", "categories", "conversation_id")
+LOCAL_COMPACT_FIELDS = COMPACT_FIELDS + ("snippet", "highlighted", "folder_name", "attachment_count")
 MAIL_API_FIELDS = {
     "id": "Id", "display_num": "Id", "subject": "Subject", "sender": "From",
     "to": "ToRecipients", "cc": "CcRecipients", "received": "ReceivedDateTime",

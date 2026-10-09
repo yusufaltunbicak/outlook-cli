@@ -85,6 +85,19 @@ def test_compound_turkish_query_and_selected_output_fields(runner, mailbox_store
     assert payload["meta"]["total_matches"] == 1
 
 
+def test_compact_local_search_retains_highlights_and_folder_context(runner, mailbox_store):
+    payload = parsed(runner.invoke(cli, ["local", "search", "toplanti", "--view", "compact", "--json"]))
+    assert len(payload["data"]) == 2
+    assert all(row["snippet"] and "[[" in row["highlighted"] and row["folder_name"] for row in payload["data"])
+    assert all("body" not in row for row in payload["data"])
+
+
+def test_attachment_output_reports_unverified_legacy_metadata(runner, mailbox_store):
+    payload = parsed(runner.invoke(cli, ["local", "attachments", "message-a", "--json"]))
+    assert payload["meta"]["local"] is True
+    assert payload["meta"]["metadata_complete"] is False
+
+
 def test_json_file_export_matches_stdout_and_data_only_remains_explicit(runner, mailbox_store, tmp_path):
     target = tmp_path / "results.json"
     result = runner.invoke(cli, ["local", "search", "toplanti", "--json", "--output", str(target)])
