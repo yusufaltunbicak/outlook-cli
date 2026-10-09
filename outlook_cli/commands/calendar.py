@@ -224,7 +224,7 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
             print_success(f"No events in the {range_desc}.")
         else:
             console.print(f"[bold cyan]Calendar ({range_desc})[/bold cyan]")
-            print_events(events)
+            print_events(events, tz=tz)
 
 
 @click.command()
@@ -241,7 +241,7 @@ def event(event_id: str, as_json: bool, tz_str: str | None, account_name: str | 
     if _wants_json(as_json):
         click.echo(to_json_envelope(ev, tz=tz))
     else:
-        print_event_detail(ev)
+        print_event_detail(ev, tz=tz)
 
 
 @click.command("event-create")
@@ -486,7 +486,7 @@ def event_instances(event_id: str, days: int, as_json: bool, tz_str: str | None,
             print_success("No occurrences found.")
         else:
             console.print(f"[bold cyan]Occurrences ({len(events)})[/bold cyan]")
-            print_events(events)
+            print_events(events, tz=tz)
 
 
 @click.command("event-respond")
