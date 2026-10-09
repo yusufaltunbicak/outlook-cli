@@ -6,7 +6,17 @@ import click
 
 from .. import account as account_service
 from ..exceptions import AccountError
-from ._common import _handle_api_error, _wants_json, confirm_action, do_login, is_no_input_mode, maybe_dry_run, print_accounts, print_success, to_json_envelope
+from ._common import (
+    _handle_api_error,
+    _wants_json,
+    confirm_action,
+    do_login,
+    is_no_input_mode,
+    maybe_dry_run,
+    print_accounts,
+    print_success,
+    to_json_envelope,
+)
 
 
 @click.group()
@@ -27,7 +37,7 @@ def add_account(name: str):
         raise AccountError(f"Account profile '{normalized}' already exists.")
 
     maybe_dry_run("account.add", {"name": normalized})
-    do_login(account_name=normalized, allow_create=True)
+    do_login(account_name=normalized, allow_create=True, headless=False)
     print_success(f"Account profile '{normalized}' added.")
 
 

@@ -2,16 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
-
 import pytest
-from click.testing import CliRunner
 
-from outlook_cli.commands import auth as auth_cmd
-from outlook_cli import auth as auth_module
 from outlook_cli import account as account_service
+from outlook_cli import auth as auth_module
+from outlook_cli.commands import auth as auth_cmd
 
 
 class TestWithTokenLogin:
@@ -88,7 +83,7 @@ class TestWithTokenUnit:
 
         saved_data = {}
 
-        def fake_save_token(t, acc, info):
+        def fake_save_token(t, acc, info, **kwargs):
             saved_data["token"] = t
             saved_data["account"] = acc
             saved_data["info"] = info
@@ -107,7 +102,6 @@ class TestWithTokenUnit:
 
     def test_login_rejects_invalid_jwt_format(self):
         """Test that login() rejects tokens with invalid JWT format."""
-        import pytest
 
         invalid_tokens = [
             "not_a_jwt",
@@ -132,7 +126,7 @@ class TestWithTokenUnit:
             }
 
         monkeypatch.setattr(auth_module, "_get_me_for_token", fake_get_me)
-        monkeypatch.setattr(auth_module, "_save_token", lambda t, a, i: None)
+        monkeypatch.setattr(auth_module, "_save_token", lambda t, a, i, **kwargs: None)
         monkeypatch.setattr(account_service, "assert_mailbox_matches", lambda *a, **k: {})
         monkeypatch.setattr(account_service, "bind_account", lambda *a, **k: {
             "mailbox_id": "mailbox123", "email": "test@example.com", "display_name": "Test User",

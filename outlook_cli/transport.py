@@ -163,7 +163,7 @@ def request_response(client, method: str, path: str, *, params=None, json=None,
                 wait = 2 ** attempts + random.uniform(0, 0.25)
             if attempts >= limit or time.monotonic() + wait >= end:
                 if response.status_code == 429:
-                    raise RateLimitError("API rate limit persisted beyond the bounded retry budget. Retry later.")
+                    raise RateLimitError("API rate limit persisted beyond the bounded retry budget. Retry later.", retry_after=wait)
                 response.raise_for_status()
             attempts += 1
             time.sleep(wait)

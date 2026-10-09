@@ -5,6 +5,7 @@ import json
 import click
 import httpx
 
+from outlook_cli.cli import cli
 from outlook_cli.commands import _common as common
 from outlook_cli.exceptions import (
     EXIT_CODE_AUTH_REQUIRED,
@@ -94,3 +95,30 @@ def test_successful_command_keeps_exit_code_zero(runner, tty_mode):
 
     assert result.exit_code == 0
     assert result.output == "ok\n"
+
+
+def test_cli_keyboard_interrupt_is_structured_exit_130(runner, monkeypatch):
+    @click.command("fixture-interrupt")
+    def interrupt():
+        raise KeyboardInterrupt
+
+    monkeypatch.setitem(cli.commands, "fixture-interrupt", interrupt)
+    result = runner.invoke(cli, ["--json", "fixture-interrupt"])
+    assert result.exit_code == 130
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "interrupted"
+    assert "checkpoints retained" in payload["error"]["message"]
+
+
+def test_cli_confirmation_abort_keeps_structured_exit_1(runner, monkeypatch):
+    @click.command("fixture-confirm")
+    def confirm():
+        click.confirm("Proceed with fixture?", abort=True, err=True)
+
+    monkeypatch.setitem(cli.commands, "fixture-confirm", confirm)
+    result = runner.invoke(cli, ["--json", "fixture-confirm"], input="n\n")
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "aborted"

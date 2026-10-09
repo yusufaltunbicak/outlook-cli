@@ -2,7 +2,7 @@
 name: outlook-cli
 description: Read, search and manage Outlook mail, calendar, categories and attachments with the local outlook CLI. Supports account-scoped local search and optional Graph indexing.
 author: yusufaltunbicak
-version: "0.2.0"
+version: "0.2.1.dev0"
 tags: [outlook, email, office365, calendar, attachments, cli]
 ---
 
@@ -58,6 +58,63 @@ Use real `id` values from results. `display_num` is a persistent account-local r
 Pagination metadata includes `complete`, `has_more`, `truncated_reason`, `pages`, `fetched_count`, `returned_count`. `--all` follows available pages on inbox/search/folder/calendar/contacts/event-instances, subject to safety limits. Provider search and subject-based thread lookup report `complete:false` / `search_scope_unknown` when global completeness cannot be proven. Never report the returned count as a whole-mailbox total. `summary` distinguishes `displayed_count` from total counts and uses null for unknown totals.
 
 ## Local index for repeated research
+
+Prefer `local` for repeated research after the user authorizes initial storage:
+
+```bash
+outlook local status --json
+outlook local search 'toplantı domain:example.com after:2026-09-01' --limit 10 --json
+outlook local search 'çalışmalarından' --match stem --has-attachments --json
+outlook local search '"proje alpha" person:alice@example.com' --json
+outlook local read MESSAGE_ID --json
+outlook local thread MESSAGE_OR_CONVERSATION_ID --limit 50 --json
+outlook local related MESSAGE_ID --limit 10 --json
+outlook local attachments MESSAGE_ID --json
+```
+
+These reads are offline and never mark mail read: no auth/keychain or network.
+They open the existing store read-only; `not_found` (exit 5) on an absent store
+means sync is needed, subject to the user's authorization to copy mail locally.
+Carry real IDs and backend; REST/Graph IDs have different namespaces. Search is
+already compact with bounded snippets, BM25 score and `highlighted` using `[[...]]`.
+Use `--fields id,subject,snippet,highlighted` to trim further. `--view compact`
+preserves local snippets, highlights and folder context.
+Fetch full messages/threads only when a result is relevant.
+
+Literal words are ANDed; quotes mean exact phrases. Fields are `from:`, `to:`,
+`person:`, `domain:`, `folder:`, `after:`, `before:`, `has:attachments`, `thread:`
+or `conversation:`. Quote field values containing spaces (`folder:"Sent Items"`).
+Explicit flags are also supported. Turkish/case folding is automatic. Prefix is
+default; `--match exact` selects whole words and `--match stem` adds conservative
+suffix stripping. Stem is a heuristic, without full morphology/infix guarantees.
+
+Check `whole_mailbox_complete`, `complete`, `oldest_sync`, `has_more` and
+`result_complete`: coverage is as of sync, not current remote freshness. No
+automatic refresh occurs; a separate online archive and attachment bytes are
+outside the default copy. A local thread can be partial when folders are missing.
+Check `local attachments` metadata `metadata_complete`; an empty list from a
+legacy import cannot certify absence of attachments until a full sync verifies it.
+
+```bash
+outlook local import-index --no-input --json  # optional; source retained
+outlook local sync --no-input --json          # all discovered folders; text+metadata
+outlook local sync --folder Inbox --no-input --json
+outlook local sync --backend graph --no-input --json  # separately configured Graph
+```
+
+Sync checkpoints each page. Repeat a failed/interrupted command to resume;
+`--full` deliberately restarts replacement snapshots. REST delta is a deprecated
+API compatibility path; Graph needs explicit registration/login. Sync is serial,
+paced, stops on failure and honors 429/Retry-After, persisting long cooldowns.
+Never log tokens, cursors or unnecessary message content.
+
+Data is in profile cache `mail.sqlite3` (0600 DB/WAL/SHM, 0700 directory). It is
+not application-encrypted. `local purge -y --no-input` removes only the new store;
+the legacy index survives. Delete only when authorized. No daemon is installed.
+`local purge --include-legacy-index -y --no-input` explicitly deletes both local
+mail stores and sidecars. Never add that flag without the user's authorization.
+
+Legacy `index` commands below retain their 0.2 behavior:
 
 ```bash
 outlook index sync --account work --no-input --json

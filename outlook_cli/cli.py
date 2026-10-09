@@ -28,6 +28,7 @@ from .commands import (
     summary as summary_mod,
     diagnostics as diagnostics_mod,
     index as index_mod,
+    local as local_mod,
 )
 from .formatter import console
 
@@ -100,12 +101,14 @@ class OutlookGroup(click.Group):
             if standalone_mode:
                 raise SystemExit(exc.exit_code)
             raise
-        except click.Abort:
+        except click.Abort as exc:
             from .serialization import error_json
+            interrupted = isinstance(exc.__cause__, KeyboardInterrupt)
             if "--json" in args or not sys.stdout.isatty():
-                click.echo(error_json("aborted", "Operation aborted."))
+                click.echo(error_json("interrupted" if interrupted else "aborted",
+                                      "Operation interrupted; committed checkpoints retained." if interrupted else "Operation aborted."))
             if standalone_mode:
-                raise SystemExit(1)
+                raise SystemExit(130 if interrupted else 1)
             raise
         finally:
             if profile_run is not None:
@@ -149,6 +152,7 @@ cli.add_command(diagnostics_mod.schema)
 cli.add_command(diagnostics_mod.doctor)
 cli.add_command(index_mod.index)
 cli.add_command(index_mod.graph_login)
+cli.add_command(local_mod.local)
 
 # Auth
 cli.add_command(auth_mod.login)

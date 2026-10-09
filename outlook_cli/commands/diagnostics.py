@@ -80,8 +80,10 @@ def doctor(as_json: bool, account_name: str | None):
         "auth": {"metadata_present": paths.token_file.exists(), "metadata_invalid": malformed,
                  "expires_in_seconds": expires_in, "keychain_checked": False},
         "state": {"legacy_id_map_present": paths.id_map_file.exists(),
-                  "index_present": (paths.cache_dir / "index.sqlite3").exists()},
+                  "index_present": (paths.cache_dir / "index.sqlite3").exists(),
+                  "local_mail_present": (paths.cache_dir / "mail.sqlite3").exists()},
         "capabilities": {"legacy_rest": True, "graph_read_delta": True, "graph_mutations": False,
-                         "local_index": True, "batch_read": True, "structured_output": True},
+                         "local_index": True, "local_mail_store": True, "rest_read_delta": True,
+                         "local_research_offline": True, "batch_read": True, "structured_output": True},
         "graph_setup": "Optional: graph-login --client-id APP_ID; requires an Entra public client app and delegated Mail.Read/User.Read consent.",
     }))

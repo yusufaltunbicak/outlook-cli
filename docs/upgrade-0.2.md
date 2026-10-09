@@ -1,5 +1,18 @@
 # Upgrading to Outlook CLI 0.2
 
+The `0.2.1.dev0` local-research extension is additive. Existing `inbox`, `search`,
+`read`, `thread` and `index search` retain their defaults. New `local search`
+results contain compact metadata/snippets; `local read` and `local thread` return
+text bodies explicitly. JSON envelopes, pipes, exports and exit codes remain
+compatible. See [local-mail.md](local-mail.md).
+
+`local import-index` reads the legacy index into separate `mail.sqlite3` without
+deleting or modifying its source. Imported coverage stays limited to that scope.
+`local sync` copies full text/attachment metadata for all discovered folders by
+default, then uses per-folder delta. Replacement full snapshots become visible
+only after each folder completes. Installation does not create a Graph app,
+scheduled service or mailbox copy.
+
 Version 0.2 hardens existing OWA/REST workflows and adds opt-in local indexing. It does not require moving the default account to Graph or running a mailbox synchronization during installation.
 
 ## Changes scripts must account for

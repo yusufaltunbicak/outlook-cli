@@ -15,9 +15,13 @@ class _Resp:
     def __init__(self, status_code: int = 200, payload: dict | None = None):
         self.status_code = status_code
         self._payload = payload or {}
+        self.content = b"{}"
 
     def json(self) -> dict:
         return self._payload
+
+    def raise_for_status(self):
+        return None
 
 
 def test_list_signatures_returns_sorted_names(monkeypatch, tmp_path):
@@ -57,7 +61,8 @@ def test_pull_signature_scans_sent_items_until_it_finds_one(monkeypatch):
         def __init__(self, *args, **kwargs):
             self.calls = 0
 
-        def get(self, *_args, **_kwargs):
+        def request(self, method, *_args, **_kwargs):
+            assert method == "GET"
             self.calls += 1
             if self.calls == 1:
                 return _Resp(payload={"value": [{"Subject": "No sig", "Body": {"Content": "<div>No signature</div>"}}]})
@@ -84,7 +89,8 @@ def test_pull_signature_raises_when_nothing_found(monkeypatch):
         def __init__(self, *args, **kwargs):
             return None
 
-        def get(self, *_args, **_kwargs):
+        def request(self, method, *_args, **_kwargs):
+            assert method == "GET"
             return _Resp(payload={"value": []})
 
         def close(self):

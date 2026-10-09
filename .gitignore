@@ -42,11 +42,43 @@ Thumbs.db
 # Outlook CLI sensitive/cache files (normally in ~/.cache, but just in case)
 token.json
 browser-state.json
+browser-state*.json
+browser_state*.json
+accounts.json
+token_metadata*.json
+graph-token*.json
+graph-auth.json
 id_map.json
 scheduled.json
 
 # Generated reports
 reports/
+work/
+outputs/
+downloads/
+attachments/
+signatures/
+full-sync*.json
+incremental-sync*.json
+delta-sync*.json
+benchmark*.json
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.sqlite3.*
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite.*
+*.db
+*.db-wal
+*.db-shm
+*.db.*
+*.eml
+*.msg
+*.pst
+*.ost
+*.mbox
 
 # Local agent instructions
 AGENTS.md

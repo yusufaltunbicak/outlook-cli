@@ -2,6 +2,10 @@
 
 Read, search, send and manage Outlook mail, calendar, categories and attachments from the terminal. Version 0.2 adds consistent machine-readable output, safe attachment downloads, concurrent reads, persistent SQLite references and an optional local search index.
 
+The `0.2.1.dev0` branch adds local-first mailbox research: compressed full text,
+resumable copying, REST/Graph delta, Turkish-folded BM25 search and offline
+conversation/attachment navigation. Existing command defaults remain compatible.
+
 The default backend uses Outlook Web Access bearer tokens captured by Playwright, without configuring your own app registration. Optional Microsoft Graph indexing uses a separate app registration and consent flow. This is an unofficial project, unaffiliated with Microsoft. The existing REST v2 and internal OWA endpoints remain compatibility dependencies; see [LICENSE](LICENSE).
 
 ## Install and authenticate
@@ -180,6 +184,34 @@ Calendar day windows use local midnight boundaries; `--timezone` controls serial
 
 ## Local research index
 
+For the new full-mailbox workflow, use `local`:
+
+```sh
+outlook local import-index --no-input --json  # optional; preserves index.sqlite3
+outlook local sync --no-input --json          # text + attachment metadata, then delta
+outlook local status --json
+outlook local search 'toplantı domain:example.com after:2026-09-01' --json
+outlook local search 'çalışmalarından' --match stem --has-attachments --json
+outlook local read MESSAGE_ID --json           # offline text; never marks read
+outlook local thread MESSAGE_OR_CONVERSATION_ID --json
+outlook local related MESSAGE_ID --json
+outlook local attachments MESSAGE_ID --json
+```
+
+Search returns bounded snippets, `[[highlighted matches]]`, BM25 scores and IDs
+without full bodies. Research reads use no network/keychain or automatic refresh.
+Sync selects every discovered primary-mailbox folder and child by default; it
+does not certify a separate online archive or recovery store. Attachment binaries
+are downloaded separately with the existing attachment command.
+
+The new store is profile-scoped `mail.sqlite3` under `~/.cache/outlook-cli/`.
+Database/WAL/SHM are 0600; the directory is 0700. It is not application-encrypted.
+`local purge -y --no-input` removes the new store and its sidecars, preserving
+`index.sqlite3`. `local compact` reclaims superseded bodies and free pages.
+See [the local guide](docs/local-mail.md) and [design research](docs/local-store-research.md).
+
+The legacy `index` commands retain their behavior:
+
 ```sh
 outlook index sync --account work --no-input --json
 outlook index sync --folder Inbox --folder Archive --no-input --json
@@ -209,6 +241,10 @@ Replace APP_UUID and TENANT with your own application's values. `OUTLOOK_GRAPH_C
 The first Graph sync is full; subsequent syncs use per-folder delta checkpoints committed with data. Invalid delta cursors trigger a full folder refresh. `--full` forces a rebuild. Graph read requests use immutable IDs. **Graph currently supports read/index operations only**; send, calendar, schedule, pin and category mutations keep their current REST/OWA paths. Do not pass Graph index IDs to those REST commands.
 
 ## Authentication, transport and storage
+
+`browser.headless: true` opts into automatic browser renewal with saved SSO state
+and a maximum 30-second capture window. Explicit `login`/`account add` remain
+visible flows. `--no-input` never opens a browser, including a headless one.
 
 401 recovery retries only the rejected HTTP request. The CLI never reruns an entire command after authentication failure. Safe reads retry selected transient/network failures within a bounded retry budget; explicit 429 respects `Retry-After`. Writes with uncertain network/5xx outcomes return `ambiguous_write` rather than being replayed. Inspect the affected item before retrying. Per-account locks limit concurrent requests across processes and serialize refresh/state updates.
 

@@ -6,7 +6,17 @@ import base64
 import json
 
 from outlook_cli import category_manager, signature_manager
-from outlook_cli.commands import attachments, auth as auth_cmd, categories, contacts, folders, manage, open_item, search, signatures
+from outlook_cli.commands import (
+    attachments,
+    categories,
+    contacts,
+    folders,
+    manage,
+    open_item,
+    search,
+    signatures,
+)
+from outlook_cli.commands import auth as auth_cmd
 
 
 def test_login_command_reports_success(runner, tty_mode, monkeypatch):
@@ -53,7 +63,8 @@ def test_folders_command_can_export_json(runner, tty_mode, monkeypatch, make_fol
     result = runner.invoke(folders.folders, ["--json", "--output", str(output)])
 
     assert result.exit_code == 0
-    assert json.loads(output.read_text())[0]["name"] == "Inbox"
+    assert json.loads(output.read_text())["data"][0]["name"] == "Inbox"
+    assert json.loads(output.read_text()) == json.loads(result.stdout)
 
 
 def test_folder_command_outputs_json(runner, tty_mode, monkeypatch, make_email):
@@ -128,7 +139,7 @@ def test_categorize_and_uncategorize_loop_over_ids(runner, tty_mode, monkeypatch
 
 
 def test_category_management_commands_delegate_to_manager(runner, tty_mode, monkeypatch):
-    monkeypatch.setattr(categories, "get_token", lambda: "token")
+    monkeypatch.setattr(categories, "_get_client", lambda: type("Client", (), {"_token": "token"})())
     monkeypatch.setattr(category_manager, "rename_category", lambda *args, **kwargs: 3)
     monkeypatch.setattr(category_manager, "clear_category", lambda *args, **kwargs: 4)
     monkeypatch.setattr(category_manager, "delete_category", lambda *args, **kwargs: None)
@@ -167,12 +178,12 @@ def test_attachments_command_downloads_inline_and_remote_content(runner, tty_mod
 
 
 def test_signature_commands_delegate_to_manager(runner, tty_mode, monkeypatch, tmp_path):
-    monkeypatch.setattr(signatures, "get_token", lambda: "token")
+    monkeypatch.setattr(signatures, "_get_client", lambda: type("Client", (), {"_token": "token"})())
     monkeypatch.setattr(signature_manager, "pull_signature", lambda token: ("<b>sig</b>", "Sent mail"))
-    monkeypatch.setattr(signature_manager, "save_signature", lambda name, html: tmp_path / f"{name}.html")
-    monkeypatch.setattr(signature_manager, "list_signatures", lambda: ["default"])
-    monkeypatch.setattr(signature_manager, "get_signature", lambda name: "<b>sig</b>")
-    monkeypatch.setattr(signature_manager, "delete_signature", lambda name: None)
+    monkeypatch.setattr(signature_manager, "save_signature", lambda name, html, **kwargs: tmp_path / f"{name}.html")
+    monkeypatch.setattr(signature_manager, "list_signatures", lambda **kwargs: ["default"])
+    monkeypatch.setattr(signature_manager, "get_signature", lambda name, **kwargs: "<b>sig</b>")
+    monkeypatch.setattr(signature_manager, "delete_signature", lambda name, **kwargs: None)
     monkeypatch.setitem(signatures.cfg, "default_signature", "default")
     monkeypatch.setattr(signatures.click, "prompt", lambda *args, **kwargs: "default")
 

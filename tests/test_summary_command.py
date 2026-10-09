@@ -24,7 +24,8 @@ def test_summary_outputs_combined_json(runner, tty_mode, monkeypatch, make_email
     payload = json.loads(result.output)
     assert payload["data"]["inbox"]["unread_count"] == 3
     assert payload["data"]["inbox"]["messages"][0]["subject"] == "Quarterly report"
-    assert payload["data"]["calendar"]["today_count"] == 1
+    assert payload["data"]["calendar"]["displayed_count"] == 1
+    assert payload["data"]["calendar"]["today_count"] is None
 
 
 def test_summary_renders_dashboard(runner, tty_mode, monkeypatch, make_email, make_event, make_folder):

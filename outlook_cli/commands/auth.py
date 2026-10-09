@@ -5,14 +5,13 @@ from __future__ import annotations
 import click
 
 from ._common import (
+    _exit_with_error,
     _get_client,
     _handle_api_error,
-    _exit_with_error,
     _wants_json,
     account_option,
     do_login,
     get_account_name,
-    print_error,
     print_success,
     print_whoami,
     to_json_envelope,
@@ -39,7 +38,7 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
     import sys
 
     try:
-        login_kwargs = {"force": force, "debug": debug}
+        login_kwargs = {"force": force, "debug": debug, "headless": False}
         if account_name:
             login_kwargs["account_name"] = account_name
         if with_token:

@@ -142,7 +142,12 @@ class _FakeBrowser:
 class _FakePlaywrightCM:
     def __init__(self, token: str | None, raise_on_wait: bool):
         self.browser = _FakeBrowser(token, raise_on_wait)
-        self.chromium = types.SimpleNamespace(launch=lambda **_kwargs: self.browser)
+        self.launch_kwargs = None
+        self.chromium = types.SimpleNamespace(launch=self.launch)
+
+    def launch(self, **kwargs):
+        self.launch_kwargs = kwargs
+        return self.browser
 
     def __enter__(self):
         return types.SimpleNamespace(chromium=self.chromium)
@@ -162,7 +167,7 @@ def _install_fake_playwright(monkeypatch, token: str | None, raise_on_wait: bool
 def test_get_token_prefers_environment(monkeypatch, tmp_path):
     _patch_account(monkeypatch, tmp_path)
     monkeypatch.setenv("OUTLOOK_TOKEN", "env-token")
-    monkeypatch.setattr(auth, "_load_cached_token", lambda: "cached-token")
+    monkeypatch.setattr(auth, "_load_cached_token", lambda *args, **kwargs: "cached-token")
     monkeypatch.setattr(auth, "login", lambda: "fresh-token")
     monkeypatch.setattr(auth, "_assert_token_matches_account", lambda *args, **kwargs: {})
 
@@ -172,7 +177,7 @@ def test_get_token_prefers_environment(monkeypatch, tmp_path):
 def test_get_token_uses_cache_before_login(monkeypatch, tmp_path):
     _patch_account(monkeypatch, tmp_path)
     monkeypatch.delenv("OUTLOOK_TOKEN", raising=False)
-    monkeypatch.setattr(auth, "_load_cached_token", lambda: "cached-token")
+    monkeypatch.setattr(auth, "_load_cached_token", lambda *args, **kwargs: "cached-token")
     monkeypatch.setattr(auth, "login", lambda: "fresh-token")
 
     assert auth.get_token() == "cached-token"
@@ -265,6 +270,7 @@ def test_load_cached_token_migrates_legacy_plaintext_token(monkeypatch, tmp_path
 def test_load_cached_token_requires_keyring_secret(monkeypatch, tmp_path):
     paths = _patch_account(monkeypatch, tmp_path)
     _patch_keyring(monkeypatch)
+    monkeypatch.setattr(auth.time, "time", lambda: 1_000)
     paths.token_file.write_text(json.dumps({"storage_backend": "keyring", "storage_version": 1, "expires_at": 2_000}))
 
     with pytest.raises(AccountError, match="not found in the keyring"):
@@ -285,13 +291,14 @@ def test_pick_best_token_prefers_working_mail_endpoint(monkeypatch):
     assert auth._pick_best_token([bad, good]) == good
 
 
-def test_pick_best_token_falls_back_to_longest_token(monkeypatch):
+def test_pick_best_token_rejects_unverified_tokens(monkeypatch):
     def fake_get(*_args, **_kwargs):
         raise auth.httpx.HTTPError("network error")
 
     monkeypatch.setattr(auth.httpx, "get", fake_get)
 
-    assert auth._pick_best_token(["short", "much-longer-token"]) == "much-longer-token"
+    with pytest.raises(AuthRequiredError, match="None of the captured tokens"):
+        auth._pick_best_token(["short", "much-longer-token"])
 
 
 def test_verify_token_handles_http_error(monkeypatch):
@@ -339,3 +346,63 @@ def test_login_raises_when_token_cannot_be_captured(monkeypatch, tmp_path):
 
     with pytest.raises(AuthRequiredError):
         auth.login()
+
+
+def test_headless_refresh_without_saved_state_fails_before_browser(monkeypatch, tmp_path):
+    _patch_account(monkeypatch, tmp_path)
+    with pytest.raises(AuthRequiredError, match="saved Outlook session"):
+        auth.login(headless=True)
+
+
+def test_headless_refresh_caps_capture_timeout(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    paths.browser_state_file.write_text("{}")
+    monkeypatch.setattr(auth.account_service, "load_account_config", lambda _: {"browser": {"headless": True, "timeout": 120}})
+    token = "x" * 101
+    cm = _install_fake_playwright(monkeypatch, token=token)
+    monkeypatch.setattr(auth, "_pick_best_token", lambda *args, **kwargs: token)
+    monkeypatch.setattr(auth, "_get_me_for_token", lambda _: {"Id": "fake-mailbox"})
+    monkeypatch.setattr(auth, "_save_token", lambda *args, **kwargs: None)
+
+    assert auth.login() == token
+    assert cm.launch_kwargs == {"headless": True, "timeout": 30_000}
+    assert cm.browser.context_kwargs["storage_state"] == str(paths.browser_state_file)
+
+
+def test_explicit_headed_login_overrides_profile_setting(monkeypatch, tmp_path):
+    _patch_account(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth.account_service, "load_account_config", lambda _: {"browser": {"headless": True}})
+    cm = _install_fake_playwright(monkeypatch, token=None, raise_on_wait=True)
+    with pytest.raises(AuthRequiredError, match="Could not capture"):
+        auth.login(headless=False)
+    assert cm.launch_kwargs["headless"] is False
+
+
+def test_no_input_still_forbids_headless_browser(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    paths.browser_state_file.write_text("{}")
+    with pytest.raises(AuthRequiredError, match="disabled in --no-input"):
+        auth.login(headless=True, allow_interactive=False)
+
+
+def test_login_debug_never_prints_request_path_query_or_token(monkeypatch, tmp_path, capsys):
+    _patch_account(monkeypatch, tmp_path)
+    token = "sensitive-test-token-" * 8
+    request_url = "https://outlook.office.com/private-mail-id?access_token=query-secret&search=private-subject"
+
+    def emit_request(page, *_args, **_kwargs):
+        page._context.callback(types.SimpleNamespace(
+            headers={"authorization": f"Bearer {token}"}, url=request_url))
+
+    monkeypatch.setattr(_FakePage, "wait_for_timeout", emit_request)
+    _install_fake_playwright(monkeypatch, token=token)
+    monkeypatch.setattr(auth, "_pick_best_token", lambda *args, **kwargs: token)
+    monkeypatch.setattr(auth, "_get_me_for_token", lambda _: {"Id": "fake-mailbox"})
+    monkeypatch.setattr(auth, "_save_token", lambda *args, **kwargs: None)
+
+    assert auth.login(debug=True) == token
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Bearer token origin: https://outlook.office.com" in output.err
+    for private in (token, "private-mail-id", "query-secret", "private-subject", "access_token"):
+        assert private not in output.err
