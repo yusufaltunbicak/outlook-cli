@@ -330,6 +330,9 @@ def arguments():
 
 def main():
     args = arguments()
+    # SQLite may create shared-memory sidecars even for read-only WAL readers.
+    # Keep those owner-only along with the private benchmark snapshots.
+    os.umask(0o077)
     result = {"offline": True, "query_suite": "turkish_business_v1", "query_count": len(QUERIES),
               "limit": args.limit, "backend": args.backend, "new_match_mode": args.match,
               "warm_query_includes": "scope/count/ranking/selected-row decoding/snippets; excludes JSON serialization",
