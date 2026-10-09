@@ -257,46 +257,58 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
             raise OutlookCliError("Sync page returned no delta checkpoint; previous checkpoint retained.")
         if continuation in seen_links:
             raise OutlookCliError("Repeated sync continuation; checkpoint retained.")
-        current, deleted = [], []
+        current, deleted = {}, set()
         identities = set()
+        prior_ids = set()
+        if rebuild and backend == "rest":
+            # The initial collection can repeat an older version on a later
+            # page. One indexed lookup per page also catches repeats after a
+            # process restart, without hydrating every initial mailbox record.
+            prior_ids = store.existing_sync_ids(backend, identity,
+                                               [m.get("Id") or m.get("id") for m in batch if not removed_id(m)])
         for message in batch:
             hydrated = False
             tombstone = removed_id(message)
             if tombstone:
-                # Hydrate delta tombstones too: a later update may appear before an older delete.
-                if not rebuild:
-                    try:
-                        message = reader.hydrate(tombstone)
-                        hydrated = True
-                    except (ResourceNotFoundError, httpx.HTTPStatusError) as exc:
-                        if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 404:
-                            raise
-                        deleted.append(tombstone)
-                        continue
-                else:
-                    deleted.append(tombstone)
+                # Initial and incremental delta pages have no authoritative
+                # ordering. An older delete must not erase an extant message.
+                try:
+                    message = reader.hydrate(tombstone)
+                    hydrated = True
+                except (ResourceNotFoundError, httpx.HTTPStatusError) as exc:
+                    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 404:
+                        raise
+                    current.pop(tombstone, None)
+                    deleted.add(tombstone)
+                    identities.add(tombstone)
                     continue
             msg_id = message.get("Id") or message.get("id")
             if not msg_id:
                 raise OutlookCliError("Sync message has no identity; checkpoint retained.")
             # Delta ordering is not authoritative. Resolve each change against current state.
             required = {"Id", "Subject", "Body", "ToRecipients", "ParentFolderId"} if backend == "rest" else {"id", "subject", "body", "toRecipients", "parentFolderId"}
-            if not hydrated and (not rebuild or not required.issubset(message) or msg_id in identities or backend == "graph"):
+            if not hydrated and (not rebuild or not required.issubset(message) or msg_id in identities or msg_id in prior_ids or backend == "graph"):
                 try:
                     message = reader.hydrate(msg_id)
                 except (ResourceNotFoundError, httpx.HTTPStatusError) as exc:
                     if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code != 404:
                         raise
-                    deleted.append(msg_id)
+                    current.pop(msg_id, None)
+                    deleted.add(msg_id)
+                    identities.add(msg_id)
                     continue
             if not required.issubset(message):
                 raise OutlookCliError("Hydrated message is incomplete; checkpoint retained.")
             parent = message.get("ParentFolderId") or message.get("parentFolderId")
             if parent and parent != identity:
-                deleted.append(msg_id)
+                current.pop(msg_id, None)
+                deleted.add(msg_id)
+                identities.add(msg_id)
                 continue
             identities.add(msg_id)
-            current.append(reader.record(message))
+            deleted.discard(msg_id)
+            current[msg_id] = reader.record(message)
+        current, deleted = list(current.values()), sorted(deleted)
         complete = continuation is None
         next_seed_done = seed_done or bool(initial_seed and delta_link)
         store.apply_page(backend, identity, name, current, removed=deleted,

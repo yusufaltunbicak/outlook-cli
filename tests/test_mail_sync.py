@@ -59,6 +59,7 @@ class FakeStore:
         self.states = {}
         self.active = {}
         self.staging = {}
+        self.removed_seen = {}
         self.begins = []
         self.commits = []
 
@@ -71,6 +72,11 @@ class FakeStore:
     def folder_state(self, backend, identity):
         return deepcopy(self.states.get((backend, identity), {}))
 
+    def existing_sync_ids(self, backend, identity, identities):
+        key = (backend, identity)
+        target = self.staging.get(key, {}) if self.states[key].get("full") else self.active.get(key, {})
+        return set(identities).intersection(set(target) | self.removed_seen.get(key, set()))
+
     def begin_sync(self, backend, identity, name, *, full, include_body, options_signature, restart=False):
         key = (backend, identity)
         state = self.states.setdefault(key, {})
@@ -79,6 +85,7 @@ class FakeStore:
             state.update(pending_url=None, seed_done=False, snapshot_mode=False, full=full, pending_full=full)
             if full:
                 self.staging[key] = {}
+            self.removed_seen[key] = set()
         state.update(options_signature=options_signature, complete=False)
         return deepcopy(state)
 
@@ -89,6 +96,7 @@ class FakeStore:
         target = self.staging.setdefault(key, {}) if state.get("full") else self.active.setdefault(key, {})
         for identity_to_remove in removed:
             target.pop(identity_to_remove, None)
+        self.removed_seen.setdefault(key, set()).update(removed)
         target.update({record["id"]: deepcopy(record) for record in records})
         state.update(pending_url=next_url, complete=complete, seed_done=seed_done, snapshot_mode=snapshot_mode)
         if complete:
@@ -96,6 +104,7 @@ class FakeStore:
             state["pending_full"] = False
             if state.get("full"):
                 self.active[key] = deepcopy(target)
+            self.removed_seen[key] = set()
         self.commits.append({"records": deepcopy(records), "removed": list(removed),
                              "complete": complete, "next_url": next_url, "cursor": cursor})
 
@@ -273,6 +282,112 @@ def test_older_delete_does_not_erase_message_that_still_exists():
     result = sync_folder(store, reader, FOLDER)
     assert result["removed"] == 0
     assert store.active[("rest", FOLDER["id"])]["a"]["subject"] == "Current"
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_initial_older_delete_does_not_erase_current_message_on_a_later_page(backend):
+    store = FakeStore()
+    seed, final = link("seed", backend), link("final", backend)
+    tombstone = {"id": "Messages('a')" if backend == "rest" else "a", "@removed": {"reason": "deleted"}}
+    first = {"value": [message("a", backend=backend)],
+             "@odata.deltaLink" if backend == "rest" else "@odata.nextLink": seed}
+    if backend == "rest":
+        first["_tracking"] = True
+    reader = FakeReader({initial_path(backend): [first],
+                         seed: [{"value": [tombstone], "@odata.deltaLink": final}]}, backend=backend,
+                        hydrated={"a": message("a", backend=backend, subject="Current")})
+    sync_folder(store, reader, FOLDER)
+    assert store.active[(backend, FOLDER["id"])]["a"]["subject"] == "Current"
+    assert store.commits[-1]["removed"] == []
+    assert reader.hydrate_calls.count("a") == (1 if backend == "rest" else 2)
+    assert store.folder_state(backend, FOLDER["id"])["cursor"] == final
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_initial_tombstone_of_moved_message_removes_only_source_membership(backend):
+    store = FakeStore()
+    store.seed("archive", backend=backend, rows=[{"id": "a", "subject": "Archive"}])
+    seed, final = link("seed", backend), link("final", backend)
+    tombstone = {"id": "Messages('a')" if backend == "rest" else "a", "@removed": {"reason": "deleted"}}
+    first = {"value": [], "@odata.deltaLink" if backend == "rest" else "@odata.nextLink": seed}
+    if backend == "rest":
+        first["_tracking"] = True
+    reader = FakeReader({initial_path(backend): [first], seed: [{"value": [tombstone], "@odata.deltaLink": final}]},
+                        backend=backend, hydrated={"a": message("a", backend=backend, parent="archive")})
+    sync_folder(store, reader, FOLDER)
+    assert not store.active[(backend, FOLDER["id"])]
+    assert "a" in store.active[(backend, "archive")]
+    assert store.commits[-1]["removed"] == ["a"]
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_initial_cross_page_older_record_resolves_against_current_state(backend):
+    store = FakeStore()
+    page2, seed, final = link("page2", backend), link("seed", backend), link("final", backend)
+    first = {"value": [message("a", backend=backend, subject="Current")], "@odata.nextLink": page2}
+    second = {"value": [message("a", backend=backend, subject="Older")], "@odata.deltaLink": seed if backend == "rest" else final}
+    pages = {initial_path(backend): [first], page2: [second]}
+    if backend == "rest":
+        first["_tracking"] = second["_tracking"] = True
+        pages[seed] = [{"value": [], "@odata.deltaLink": final}]
+    reader = FakeReader(pages, backend=backend, hydrated={"a": message("a", backend=backend, subject="Current")})
+    sync_folder(store, reader, FOLDER)
+    assert store.active[(backend, FOLDER["id"])]["a"]["subject"] == "Current"
+    assert reader.hydrate_calls.count("a") == (1 if backend == "rest" else 2)
+
+
+def test_resumed_initial_rest_page_detects_stale_record_from_committed_staging():
+    store = FakeStore()
+    page2, seed, final = link("page2"), link("seed"), link("final")
+    first = FakeReader({initial_path(): [{"value": [message("a", subject="Current")],
+                                         "_tracking": True, "@odata.nextLink": page2}]})
+    with pytest.raises(OutlookCliError, match="page budget"):
+        sync_folder(store, first, FOLDER, max_pages=1)
+    resumed = FakeReader({page2: [{"value": [message("a", subject="Older")], "_tracking": True, "@odata.deltaLink": seed}],
+                          seed: [{"value": [], "@odata.deltaLink": final}]}, hydrated={"a": message("a", subject="Current")})
+    sync_folder(store, resumed, FOLDER)
+    assert store.active[("rest", FOLDER["id"])]["a"]["subject"] == "Current"
+    assert resumed.hydrate_calls == ["a"]
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_initial_rest_tombstone_prevents_later_stale_record_from_resurrecting_deleted_message(resume):
+    store = FakeStore()
+    page2, seed, final = link("page2"), link("seed"), link("final")
+    tombstone = {"id": "Messages('a')", "@removed": {"reason": "deleted"}}
+    first_page = {"value": [tombstone], "_tracking": True, "@odata.nextLink": page2}
+    later_pages = {page2: [{"value": [message("a", subject="Stale")], "_tracking": True, "@odata.deltaLink": seed}],
+                   seed: [{"value": [], "@odata.deltaLink": final}]}
+    if resume:
+        reader = FakeReader({initial_path(): [first_page]})
+        with pytest.raises(OutlookCliError, match="page budget"):
+            sync_folder(store, reader, FOLDER, max_pages=1)
+        reader = FakeReader(later_pages)
+    else:
+        reader = FakeReader({initial_path(): [first_page], **later_pages})
+    sync_folder(store, reader, FOLDER)
+    assert not store.active[("rest", FOLDER["id"])]
+    assert reader.hydrate_calls == (["a"] if resume else ["a", "a"])
+
+
+def test_later_current_delete_in_same_page_supersedes_earlier_body_read():
+    store = FakeStore()
+    store.seed(rows=[{"id": "a", "subject": "Old"}])
+    tombstone = {"id": "Messages('a')", "@removed": {"reason": "deleted"}}
+    reader = FakeReader({link("old-delta"): [{"value": [message("a"), tombstone], "@odata.deltaLink": link("final")}]})
+    reads = iter([message("a", subject="Existed before delete"), ResourceNotFoundError("now deleted")])
+
+    def changing_current_state(identity):
+        value = next(reads)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    reader.hydrate = changing_current_state
+    sync_folder(store, reader, FOLDER)
+    assert not store.active[("rest", FOLDER["id"])]
+    assert store.commits[-1]["records"] == []
+    assert store.commits[-1]["removed"] == ["a"]
 
 
 def test_move_out_reconciles_membership_from_current_parent():

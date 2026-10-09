@@ -277,6 +277,9 @@ class MailStore:
         CREATE INDEX IF NOT EXISTS mail_identity ON messages(backend,id);
         CREATE INDEX IF NOT EXISTS mail_scope ON messages(backend,folder_id,generation,received);
         CREATE INDEX IF NOT EXISTS mail_conversation ON messages(backend,conversation_id,received);
+        CREATE TABLE IF NOT EXISTS sync_removed (
+            backend TEXT NOT NULL, folder_id TEXT NOT NULL, generation TEXT NOT NULL, id TEXT NOT NULL,
+            PRIMARY KEY(backend,folder_id,generation,id));
         CREATE TABLE IF NOT EXISTS addresses (
             message_rowid INTEGER NOT NULL REFERENCES messages(record_id) ON DELETE CASCADE,
             address TEXT NOT NULL, name TEXT NOT NULL, domain TEXT NOT NULL, role TEXT NOT NULL,
@@ -309,12 +312,35 @@ class MailStore:
         row = self.db.execute("SELECT * FROM folders WHERE backend=? AND id=?", (backend, folder_id)).fetchone()
         return dict(row) if row else {}
 
+    def existing_sync_ids(self, backend: str, folder_id: str, identities) -> set[str]:
+        """Find previously committed page IDs in the current round, including after resume."""
+        state = self.folder_state(backend, folder_id)
+        generation = state.get("pending_generation")
+        if not generation:
+            raise OutlookCliError("begin_sync is required before checking synchronized message IDs")
+        identities = list(set(identities))
+        existing = set()
+        for start in range(0, len(identities), 500):
+            batch = identities[start:start + 500]
+            placeholders = ",".join("?" for _ in batch)
+            rows = self.db.execute(f"SELECT id FROM messages WHERE backend=? AND folder_id=? AND generation=? AND id IN ({placeholders})",
+                                   [backend, folder_id, generation, *batch])
+            existing.update(row[0] for row in rows)
+            # A later stale version may follow an already committed tombstone.
+            # Keep these IDs through interruption, then clear at round completion.
+            removed = self.db.execute(f"SELECT id FROM sync_removed WHERE backend=? AND folder_id=? AND generation=? AND id IN ({placeholders})",
+                                      [backend, folder_id, generation, *batch])
+            existing.update(row[0] for row in removed)
+        return existing
+
     def begin_sync(self, backend: str, folder_id: str, name: str, *, full: bool,
                    include_body: bool = True, options_signature: str = "", restart: bool = False) -> dict:
         state = self.folder_state(backend, folder_id)
         if not restart and state.get("pending_generation") and state.get("options_signature") == options_signature and bool(state["include_body"]) == include_body:
             return state
         with self.db:
+            if state.get("pending_generation"):
+                self.db.execute("DELETE FROM sync_removed WHERE backend=? AND folder_id=? AND generation=?", (backend, folder_id, state["pending_generation"]))
             if state.get("pending_full") and state.get("pending_generation"):
                 self._delete_where("backend=? AND folder_id=? AND generation=?", (backend, folder_id, state["pending_generation"]))
             generation = uuid.uuid4().hex if full or not state.get("active_generation") else state["active_generation"]
@@ -389,11 +415,13 @@ class MailStore:
         if not state.get("pending_generation"):
             raise OutlookCliError("begin_sync is required before applying mail pages")
         generation = state["pending_generation"]
+        removed = list(removed)
         with self.db:
             for identity in removed:
                 self._delete_where("backend=? AND folder_id=? AND generation=? AND id=?", (backend, folder_id, generation, identity))
             for message in messages:
                 self._put(backend, folder_id, generation, message)
+            self.db.executemany("INSERT OR IGNORE INTO sync_removed VALUES(?,?,?,?)", [(backend, folder_id, generation, identity) for identity in removed])
             if complete:
                 self._remove_moved(backend, folder_id, generation)
                 old = state.get("active_generation")
@@ -401,6 +429,7 @@ class MailStore:
                     self._delete_where("backend=? AND folder_id=? AND generation=?", (backend, folder_id, old))
                 self.db.execute("""UPDATE folders SET name=?,active_generation=?,pending_generation=NULL,pending_full=0,
                     pending_url=NULL,cursor=?,seed_done=?,synced_at=?,complete=1,error=NULL WHERE backend=? AND id=?""", (name, generation, cursor, int(bool(seed_done if seed_done is not None else state["seed_done"])), _now(), backend, folder_id))
+                self.db.execute("DELETE FROM sync_removed WHERE backend=? AND folder_id=?", (backend, folder_id))
             else:
                 self.db.execute("UPDATE folders SET name=?,pending_url=?,seed_done=?,error=NULL WHERE backend=? AND id=?", (name, next_url, int(bool(seed_done if seed_done is not None else state["seed_done"])), backend, folder_id))
             if snapshot_mode is not None:
@@ -422,6 +451,7 @@ class MailStore:
             stale = [row[0] for row in self.db.execute("SELECT id FROM folders WHERE backend=?", (backend,)) if row[0] not in live_ids]
             for identity in stale:
                 self._delete_where("backend=? AND folder_id=?", (backend, identity))
+                self.db.execute("DELETE FROM sync_removed WHERE backend=? AND folder_id=?", (backend, identity))
                 self.db.execute("DELETE FROM folders WHERE backend=? AND id=?", (backend, identity))
 
     def set_cooldown(self, seconds: float):

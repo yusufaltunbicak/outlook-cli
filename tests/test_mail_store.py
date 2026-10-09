@@ -130,6 +130,33 @@ def test_checkpoint_and_page_are_atomic_on_bad_record(store):
     assert store.query("toplantı")[0]
 
 
+def test_existing_sync_ids_look_up_pending_generation_and_chunk_large_batches(store):
+    populate(store, [message("old-snapshot")])
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture")
+    records = [message(f"staged-{index}") for index in range(600)]
+    store.apply_page("rest", "inbox", "Inbox", records, next_url="next-page")
+    requested = [item["id"] for item in records] + ["old-snapshot", "missing"]
+    assert store.existing_sync_ids("rest", "inbox", requested) == {item["id"] for item in records}
+    # The durable generation, rather than an in-process set, survives a resume.
+    resumed = store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture")
+    assert resumed["pending_url"] == "next-page"
+    assert store.existing_sync_ids("rest", "inbox", ["staged-1"]) == {"staged-1"}
+    assert not store.existing_sync_ids("rest", "inbox", [])
+
+
+def test_tombstone_ids_survive_resume_but_are_cleared_at_terminal_or_restart(store):
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture")
+    store.apply_page("rest", "inbox", "Inbox", [], removed=["deleted"], next_url="next-page")
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture")
+    assert store.existing_sync_ids("rest", "inbox", ["deleted"]) == {"deleted"}
+    store.apply_page("rest", "inbox", "Inbox", [], complete=True, cursor="final")
+    assert store.db.execute("SELECT count(*) FROM sync_removed").fetchone()[0] == 0
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture")
+    store.apply_page("rest", "inbox", "Inbox", [], removed=["discard"], next_url="next-page")
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="fixture", restart=True)
+    assert not store.existing_sync_ids("rest", "inbox", ["discard"])
+
+
 def test_delta_cursor_advances_only_on_terminal_page(store):
     populate(store, [message("one"), message("two")])
     store.begin_sync("rest", "inbox", "Inbox", full=False)
