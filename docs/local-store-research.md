@@ -7,7 +7,8 @@ synthetic experiments below are not measurements of a production mailbox.
 
 Use the existing OWA session with Outlook REST v2 **native per-folder change
 tracking**, a separate account-local SQLite store, transactional page checkpoints,
-plain-text full-text search, and explicit synchronization. Keep the existing Graph
+compressed body blobs, contentless word-token FTS5, and explicit synchronization.
+Keep the existing Graph
 backend available for accounts that already have an app registration. Do not
 create a registration or install a background service implicitly.
 
@@ -121,9 +122,12 @@ deletion key. Deduplicate body blobs by hash rather than conflating sent/inbox
 copies. Avoid indexing HTML markup, CSS, scripts, images or base64 attachment
 content. Compress retained payloads and keep body output opt-in.
 
-SQLite FTS5 supports relevance ranking, phrase/prefix queries, snippets and
-highlighting. An external-content index avoids an extra text copy. The English
-Porter tokenizer is unsuitable for Turkish. Trigram search supports infix
+SQLite FTS5 supports relevance ranking and phrase/prefix queries. The delivered
+store uses a **contentless word-token index**; compressed body blobs supply the
+original text for application-generated snippets and Unicode-aware highlights.
+There is no additional full plaintext column in the production database.
+External-content FTS is an alternative when plaintext already exists in a table.
+The English Porter tokenizer is unsuitable for Turkish. Trigram search supports infix
 matching, with a minimum three-character full-text token; `detail=none` reduces
 index size but longer MATCH tokens require a different approach such as indexed
 LIKE. [FTS5](https://sqlite.org/fts5.html)
@@ -155,6 +159,42 @@ All three matched folded queries such as `TOPLANTI`, `isbirligi`, `calisma`,
 size/latency tradeoff for substring search. It does not establish production
 sizes, morphology precision, or mailbox p50/p95. Use the mailbox benchmark for
 those claims.
+
+Choose contentless word tokens for the initial store. The synthetic small-trigram
+LIKE variant has an existing plaintext content table; that does not establish
+the same storage footprint for a compressed-body store. Providing indexed LIKE
+with accessible plaintext or SQL decompression adds another query/storage path.
+Full-detail trigram inflated both this fixture and the independent implementation
+experiment, while prefix search provides suffix-form recall with one small index.
+Infix matching remains an explicit follow-up, not a delivered capability.
+
+### Mailbox benchmark and fair scope
+
+`scripts/benchmark_local.py` opens both databases read-only, emits only counts,
+timings and byte totals, and never synchronizes. CLI timing uses fresh processes
+against private temporary SQLite backups; backup creation is excluded. Saved
+full/incremental sync reports are reduced to numeric aggregates, without folder
+names, addresses, message IDs or provider cursor/error text.
+
+```sh
+umask 077
+python scripts/benchmark_local.py \
+  --legacy ~/.cache/outlook-cli/index.sqlite3 \
+  --store ~/.cache/outlook-cli/mail.sqlite3 \
+  --comparable-scope --repeats 20 --cli-repeats 3 \
+  --first-full-report full-sync.json --incremental-report incremental-sync.json \
+  > benchmark.json
+```
+
+The normal section measures the legacy scope and the new whole-mailbox prefix
+search separately. Their counts and match modes differ; do not present that as a
+comparison over identical corpora. `--comparable-scope` adds exact searches in
+each legacy folder mapped by retained ID or unique Turkish-folded name, with 25
+results per folder. It reports medians of folder/query p50/p95 measurements,
+**not** the latency of a single search across their union. A missing or ambiguous
+mapping makes scope comparison unknown and prevents partial-scope timing claims.
+Matched folders still have different snapshot dates and indexed HTML/plain-text
+representation; inspect counts and completeness before interpreting a speedup.
 
 ### Semantic search decision
 
@@ -188,15 +228,30 @@ provide an explicit migration. A local purge must remove the selected store and
 its sidecars without touching the remote mailbox, authentication or an unrelated
 legacy index. Backups and SSD snapshots are outside logical file deletion.
 
+The delivered implementation covers native REST full/delta/resume checkpoints,
+folder discovery, compressed bodies, attachment metadata pagination, offline
+search/read/thread/related-person/attachment navigation, and legacy preservation.
+Mock tests cover pagination, cursor resets, sparse changes and moved/deleted
+records. Real-account verification must use read-only enumeration and naturally
+occurring changes; deliberate live mailbox moves or deletions are outside the
+authorized validation scope.
+Conservative optional suffix expansion is available, but complete Turkish
+linguistic stemming and arbitrary infix matching are not delivered.
+
 Remaining work, ordered by likely value:
 
-1. Validate long-running REST delta and attachment metadata pagination against
-   mocked legacy/modern responses; maintain Graph as the durable migration path.
-2. Extend query evaluation and Turkish morphology fixtures, then select stem
-   expansion only when measured recall gain outweighs false positives.
+1. Make supported Graph provisioning straightforward when the user chooses an
+   Entra app registration. Continue evaluating long-running cursor expiry,
+   tenant migrations and naturally occurring moves/deletions through read-only
+   observations; use mocks for intentionally constructed mailbox changes.
+2. Evaluate full Turkish linguistic stemming and infix recall on labeled queries;
+   choose expansion/indexing only when recall gain outweighs false positives and
+   measured disk/query cost. Keep current prefix and exact semantics predictable.
 3. Add optional attachment-content extraction on requested downloads, with byte
    limits and provenance; never fetch all attachment binaries implicitly.
 4. Offer explicit scheduled sync after cadence/consent choice; show freshness in
    every local result rather than automatically connecting during search.
-5. Offer opt-in hybrid semantic reranking after a real relevance benchmark.
+5. Evaluate opt-in hybrid semantic reranking with Turkish relevance labels before
+   adding it; model throughput, relevance and mailbox embedding size remain
+   unmeasured, while the calculated minimum vector storage is recorded above.
 6. Maildir/RFC822 export and application-level at-rest encryption if requested.
