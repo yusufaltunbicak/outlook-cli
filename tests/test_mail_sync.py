@@ -15,7 +15,7 @@ from outlook_cli.exceptions import (
     RateLimitError,
     ResourceNotFoundError,
 )
-from outlook_cli.graph import GRAPH_URL
+from outlook_cli.graph import GRAPH_URL, graph_to_record
 from outlook_cli.mail_sync import (
     GraphSyncReader,
     RestReader,
@@ -700,3 +700,90 @@ def test_larger_page_size_resumes_pending_full_round_without_replacing_staged_ro
     assert state["cursor"] == final
     assert state["complete"] is True
     assert state["snapshot_mode"] is False
+
+
+@pytest.mark.parametrize("converter", [graph_to_record, GraphSyncReader(None).record])
+def test_graph_null_message_fields_map_to_safe_empty_values(converter):
+    value = {"id": "null-graph-draft", "subject": "Draft", "from": None, "body": None,
+             "toRecipients": None, "ccRecipients": None, "bccRecipients": None,
+             "replyTo": None, "categories": None, "attachments": []}
+
+    record = converter(value)
+
+    assert record["sender"] == {"name": "", "address": ""}
+    assert record["body"] == ""
+    assert record["body_type"] == "text"
+    assert record["to"] == []
+    assert record["cc"] == []
+    assert record["categories"] == []
+    if "bcc" in record:
+        assert record["bcc"] == []
+        assert record["reply_to"] == []
+    assert value["body"] is None
+
+
+def test_graph_null_nested_email_addresses_map_safely_for_all_recipient_roles():
+    value = message("null-address", backend="graph")
+    for role in ("from", "toRecipients", "ccRecipients", "bccRecipients", "replyTo"):
+        value[role] = {"emailAddress": None} if role == "from" else [{"emailAddress": None}]
+    value["attachments"] = []
+
+    record = GraphSyncReader(None).record(value)
+
+    assert record["sender"] == {"name": "", "address": ""}
+    for role in ("to", "cc", "bcc", "reply_to"):
+        assert record[role] == [{"name": "", "address": ""}]
+
+
+@pytest.mark.parametrize("tracking", [None, False])
+@pytest.mark.parametrize("with_next_page", [False, True])
+def test_initial_rest_delta_without_applied_tracking_rejects_all_rows_and_checkpoint(tracking, with_next_page):
+    store = FakeStore()
+    store.seed(rows=[{"id": "old", "subject": "previous complete snapshot"}])
+    response = {"value": [message("new")], "@odata.deltaLink": link("ambiguous-seed")}
+    if tracking is not None:
+        response["_tracking"] = tracking
+    if with_next_page:
+        response["@odata.nextLink"] = link("ambiguous-next")
+    reader = FakeReader({initial_path(): [response]})
+
+    with pytest.raises(OutlookCliError, match="ambiguous tracking state"):
+        sync_folder(store, reader, FOLDER, full=True)
+
+    assert len(reader.calls) == 1
+    assert store.commits == []
+    assert list(store.active[("rest", FOLDER["id"])]) == ["old"]
+    state = store.folder_state("rest", FOLDER["id"])
+    assert state["complete"] is False
+    assert state["cursor"] == link("old-delta")
+    assert state["pending_url"] is None
+    assert state["snapshot_mode"] is False
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_snapshot_round_never_adopts_delta_on_a_later_continuation(interrupted):
+    store = FakeStore()
+    store.seed(rows=[{"id": "old", "subject": "previous complete snapshot"}])
+    page2, accidental_delta = link("snapshot-page2"), link("must-not-be-adopted")
+    responses = {initial_path(): [{"value": [message("a")], "_tracking": False, "@odata.nextLink": page2}],
+                 page2: [{"value": [message("b")], "@odata.deltaLink": accidental_delta}]}
+    reader = FakeReader(responses)
+    if interrupted:
+        with pytest.raises(OutlookCliError, match="page budget"):
+            sync_folder(store, reader, FOLDER, full=True, max_pages=1)
+        assert store.folder_state("rest", FOLDER["id"])["snapshot_mode"] is True
+        assert list(store.active[("rest", FOLDER["id"])]) == ["old"]
+        reader = FakeReader({page2: responses[page2]})
+        result = sync_folder(store, reader, FOLDER)
+        assert result["resumed"] is True
+        assert reader.calls == [(page2, None)]
+    else:
+        result = sync_folder(store, reader, FOLDER, full=True)
+
+    assert result["mode"] == "snapshot"
+    assert store.commits[-1]["cursor"] is None
+    state = store.folder_state("rest", FOLDER["id"])
+    assert state["complete"] is True
+    assert state["snapshot_mode"] is True
+    assert state["cursor"] is None
+    assert set(store.active[("rest", FOLDER["id"])]) == {"a", "b"}
