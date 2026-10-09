@@ -174,6 +174,32 @@ def test_filters_query_fields_recipients_domains_dates_and_attachments(store):
         store.query(after="not-a-date")
 
 
+def test_attachment_filter_excludes_inline_only_but_retains_their_metadata(store):
+    inline = {"id": "logo", "name": "signature-logo.png", "content_type": "image/png", "size": 42, "is_inline": True}
+    ordinary = {"id": "report", "name": "payment-report.pdf", "content_type": "application/pdf", "size": 400, "is_inline": False}
+    populate(store, [message("inline", attachments=[inline], has_attachments=False),
+                     message("ordinary", attachments=[ordinary], has_attachments=False),
+                     message("provider-flag", attachments=[], has_attachments=True)])
+    rows, _ = store.query(has_attachments=True)
+    assert {row["id"] for row in rows} == {"ordinary", "provider-flag"}
+    assert not store.read("inline")["has_attachments"]
+    assert store.read("ordinary")["has_attachments"]
+    assert store.attachments("inline") == [inline]
+    assert store.query("signature-logo")[0][0]["attachment_count"] == 1
+
+
+def test_compact_repairs_attachment_flags_generated_by_an_older_sync_process(store):
+    inline = {"id": "logo", "name": "logo.png", "is_inline": True}
+    ordinary = {"id": "report", "name": "report.pdf", "is_inline": False}
+    populate(store, [message("inline", attachments=[inline]), message("ordinary", attachments=[ordinary])])
+    with store.db:
+        store.db.execute("UPDATE messages SET has_attachments=1 WHERE id='inline'")
+        store.db.execute("UPDATE messages SET has_attachments=0 WHERE id='ordinary'")
+    assert store.compact()["attachment_flags_repaired"] == 2
+    assert {row["id"] for row in store.query(has_attachments=True)[0]} == {"ordinary"}
+    assert store.compact()["attachment_flags_repaired"] == 0
+
+
 def test_inventory_does_not_claim_whole_mailbox_from_partial_scope(store):
     store.set_inventory("rest", {"inbox", "archive"})
     populate(store, [message()])
@@ -320,5 +346,24 @@ def test_legacy_migration_is_sideways_and_retains_source_bytes(tmp_path):
         assert not store.status()["whole_mailbox_complete"]
         assert store.migrate_legacy(path)["skipped_folders"] == 1
         assert store.read("one")["body"] == message()["body"]
+    finally:
+        store.close()
+
+
+def test_preview_only_legacy_migration_does_not_claim_stored_bodies(tmp_path):
+    path = tmp_path / "legacy" / "index.sqlite3"
+    legacy = MailIndex(path)
+    legacy.apply("rest", "inbox", "Inbox", [message(body="", preview="Ödeme toplantısı")], full=True, include_body=False)
+    legacy.close()
+    store = MailStore(tmp_path / "new" / "mail.sqlite3")
+    try:
+        store.migrate_legacy(path)
+        rows, meta = store.query("odeme")
+        assert rows
+        assert store.status()["bodies"]["unique"] == 0
+        assert "otherwise previews" in meta["body_scope"]
+        assert not store.folder_state("rest", "inbox")["include_body"]
+        assert store.read("one")["body"] == ""
+        assert not meta["whole_mailbox_complete"]
     finally:
         store.close()

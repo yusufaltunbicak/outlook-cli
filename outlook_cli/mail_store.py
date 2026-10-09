@@ -80,6 +80,11 @@ def _unpack(value: bytes) -> dict:
     return json.loads(zlib.decompress(value))
 
 
+def _has_attachments(record: dict) -> bool:
+    """Visible attachments exclude inline signatures/images unless the provider flags them."""
+    return bool(record.get("has_attachments") or any(not item.get("is_inline", False) for item in record.get("attachments", [])))
+
+
 def _received(value) -> str:
     if not value:
         return ""
@@ -364,7 +369,7 @@ class MailStore:
         record["received"] = _received(record.get("received"))
         self._delete_where("backend=? AND folder_id=? AND generation=? AND id=?", (backend, folder_id, generation, record["id"]))
         result = self.db.execute("""INSERT INTO messages(backend,id,folder_id,generation,received,conversation_id,has_attachments,body_hash,metadata)
-            VALUES(?,?,?,?,?,?,?,?,?)""", (backend, record["id"], folder_id, generation, record["received"], record.get("conversation_id") or "", int(bool(record.get("has_attachments") or record["attachments"])), digest, _pack(record)))
+            VALUES(?,?,?,?,?,?,?,?,?)""", (backend, record["id"], folder_id, generation, record["received"], record.get("conversation_id") or "", int(_has_attachments(record)), digest, _pack(record)))
         rowid = result.lastrowid
         self.db.execute("INSERT INTO mail_fts(rowid,subject,people,body,attachments) VALUES(?,?,?,?,?)", (rowid, *self._fts_values(record, plain)))
         people = [(record.get("sender") or {}, "from")]
@@ -554,7 +559,8 @@ class MailStore:
         if body_format not in ("text", "html", "none", "preview"):
             raise ValueError("body_format must be text, html, none or preview")
         record = _unpack(row["metadata"])
-        record.update(backend=backend, folder_id=row["folder_id"], folder_name=row["folder_name"], local=True)
+        record.update(backend=backend, folder_id=row["folder_id"], folder_name=row["folder_name"],
+                      has_attachments=bool(row["has_attachments"]), local=True)
         if body_format != "none":
             record["body"] = record.get("preview", "") if body_format == "preview" else self._body(row["body_hash"], original=body_format == "html")
             if body_format != "html":
@@ -610,13 +616,24 @@ class MailStore:
 
     def compact(self) -> dict:
         """Explicit maintenance, never erase the retained legacy index."""
+        repaired = 0
         with self.db:
+            # A sync already running in an older process can have generated
+            # inline-only flags. Repair from original provider metadata without
+            # refetching mail or changing the preserved source index.
+            records = self.db.execute("SELECT record_id,metadata,has_attachments FROM messages")
+            while batch := records.fetchmany(500):
+                for row in batch:
+                    value = int(_has_attachments(_unpack(row["metadata"])))
+                    if value != row["has_attachments"]:
+                        self.db.execute("UPDATE messages SET has_attachments=? WHERE record_id=?", (value, row["record_id"]))
+                        repaired += 1
             self.db.execute("DELETE FROM bodies WHERE hash NOT IN (SELECT body_hash FROM messages WHERE body_hash IS NOT NULL)")
             self.db.execute("INSERT INTO mail_fts(mail_fts) VALUES('optimize')")
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.db.execute("VACUUM")
         self._private_files()
-        return self.status()
+        return {**self.status(), "attachment_flags_repaired": repaired}
 
     def migrate_legacy(self, source: Path, *, batch_size=100) -> dict:
         source = Path(source)
