@@ -8,6 +8,7 @@ import time
 from base64 import urlsafe_b64decode
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 import keyring
@@ -125,8 +126,16 @@ def login(
         if auth.lower().startswith("bearer "):
             token = auth.split(" ", 1)[1]
             if debug:
-                seen_urls.append(request.url[:120])
-                _diagnostic(f"  [debug] Bearer token in: {request.url[:120]}")
+                # Request paths and queries can contain mailbox IDs, search text,
+                # auth parameters or session secrets. An origin identifies the
+                # capture source without emitting any of those values.
+                try:
+                    source = urlsplit(request.url)
+                    origin = f"{source.scheme}://{source.hostname or 'unknown'}"
+                except ValueError:
+                    origin = "unknown"
+                seen_urls.append(origin)
+                _diagnostic(f"  [debug] Bearer token origin: {origin}")
             if len(token) > 100:
                 captured_token.append(token)
                 if debug:

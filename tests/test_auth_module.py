@@ -383,3 +383,26 @@ def test_no_input_still_forbids_headless_browser(monkeypatch, tmp_path):
     paths.browser_state_file.write_text("{}")
     with pytest.raises(AuthRequiredError, match="disabled in --no-input"):
         auth.login(headless=True, allow_interactive=False)
+
+
+def test_login_debug_never_prints_request_path_query_or_token(monkeypatch, tmp_path, capsys):
+    _patch_account(monkeypatch, tmp_path)
+    token = "sensitive-test-token-" * 8
+    request_url = "https://outlook.office.com/private-mail-id?access_token=query-secret&search=private-subject"
+
+    def emit_request(page, *_args, **_kwargs):
+        page._context.callback(types.SimpleNamespace(
+            headers={"authorization": f"Bearer {token}"}, url=request_url))
+
+    monkeypatch.setattr(_FakePage, "wait_for_timeout", emit_request)
+    _install_fake_playwright(monkeypatch, token=token)
+    monkeypatch.setattr(auth, "_pick_best_token", lambda *args, **kwargs: token)
+    monkeypatch.setattr(auth, "_get_me_for_token", lambda _: {"Id": "fake-mailbox"})
+    monkeypatch.setattr(auth, "_save_token", lambda *args, **kwargs: None)
+
+    assert auth.login(debug=True) == token
+    output = capsys.readouterr()
+    assert output.out == ""
+    assert "Bearer token origin: https://outlook.office.com" in output.err
+    for private in (token, "private-mail-id", "query-secret", "private-subject", "access_token"):
+        assert private not in output.err
