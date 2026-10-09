@@ -1,0 +1,60 @@
+name: Offline CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - feature/local-mail-research
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.14"
+          - os: macos-latest
+            python: "3.14"
+    env:
+      OUTLOOK_RUN_SMOKE: "0"
+      OUTLOOK_CLI_CACHE: ${{ runner.temp }}/outlook-cli-cache
+      OUTLOOK_CLI_CONFIG: ${{ runner.temp }}/outlook-cli-config
+      PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install package and test tools
+        run: python -m pip install ".[dev]" build
+      - name: Check SQLite FTS5
+        run: |
+          python - <<'PY'
+          import sqlite3
+          import sys
+          with sqlite3.connect(":memory:") as db:
+              db.execute("CREATE VIRTUAL TABLE probe USING fts5(text, content='', tokenize='unicode61 remove_diacritics 2', prefix='2 3')")
+          print(f"Python {sys.version.split()[0]}; SQLite {sqlite3.sqlite_version}; FTS5 available")
+          PY
+      - name: Run offline tests
+        run: python -m pytest -m "not smoke" -q
+      - name: Check critical lint errors
+        run: python -m ruff check --select E9,F63,F7,F82 outlook_cli tests scripts
+      - name: Build wheel and source distribution
+        run: python -m build --sdist --wheel

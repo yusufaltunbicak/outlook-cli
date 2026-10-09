@@ -83,5 +83,3 @@ def test_smoke_schedule_list(live_client: OutlookClient):
     for entry in entries[:1]:
         assert "subject" in entry
         assert "scheduled_at" in entry
-
-
