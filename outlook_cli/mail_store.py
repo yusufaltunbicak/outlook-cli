@@ -658,6 +658,7 @@ class MailStore:
             self.db.execute("INSERT INTO mail_fts(mail_fts) VALUES('optimize')")
         self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self.db.execute("VACUUM")
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         self._private_files()
         return {**self.status(), "attachment_flags_repaired": repaired}
 

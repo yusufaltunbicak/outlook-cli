@@ -249,7 +249,8 @@ def test_update_delete_fts_old_tokens_are_removed(store):
     store.begin_sync("rest", "inbox", "Inbox", full=False)
     store.apply_page("rest", "inbox", "Inbox", [], removed=["one"], complete=True, cursor="newer")
     assert not store.query("replacementword")[0]
-    store.compact()
+    compacted = store.compact()
+    assert compacted["file_bytes"].get("-wal", 0) == 0
     assert store.status()["bodies"]["unique"] == 0
 
 
