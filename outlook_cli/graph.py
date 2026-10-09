@@ -256,12 +256,13 @@ def materialize_changes(reader, changes: list[dict], folder_id: str, *, include_
 
 def graph_to_record(message: dict) -> dict:
     def addresses(items):
-        return [{"name": x.get("emailAddress", {}).get("name", ""),
-                 "address": x.get("emailAddress", {}).get("address", "")} for x in items]
-    sender = addresses([message.get("from", {})])[0]
+        return [{"name": (x.get("emailAddress") or {}).get("name", ""),
+                 "address": (x.get("emailAddress") or {}).get("address", "")} for x in items or []]
+    sender = addresses([message.get("from") or {}])[0]
+    body = message.get("body") or {}
     return {"id": message["id"], "subject": message.get("subject", ""), "sender": sender,
             "to": addresses(message.get("toRecipients", [])), "cc": addresses(message.get("ccRecipients", [])),
             "received": message.get("receivedDateTime", ""), "preview": message.get("bodyPreview", ""),
-            "body": message.get("body", {}).get("content", ""), "body_type": message.get("body", {}).get("contentType", "text"),
-            "conversation_id": message.get("conversationId", ""), "categories": message.get("categories", []),
+            "body": body.get("content", ""), "body_type": body.get("contentType", "text"),
+            "conversation_id": message.get("conversationId", ""), "categories": message.get("categories") or [],
             "is_read": message.get("isRead", False), "has_attachments": message.get("hasAttachments", False)}

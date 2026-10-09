@@ -73,9 +73,7 @@ def complete_attachments(reader, message, *, graph=False):
         identity = message.get("id" if graph else "Id")
         root = "/me/messages" if graph else "/messages"
         path = f"{root}/{quote(identity, safe='')}/attachments"
-        fields = ATTACHMENT_FIELDS[0].lower() + ATTACHMENT_FIELDS[1:] if graph else ATTACHMENT_FIELDS
-        if graph:
-            fields = "id,name,size,contentType,isInline"
+        fields = "id,name,size,contentType,isInline" if graph else ATTACHMENT_FIELDS
         page = reader.get(path, params={"$select": fields})
         values = page.get("value")
         link = page.get("@odata.nextLink") or page.get("odata.nextLink")
@@ -183,8 +181,8 @@ class GraphSyncReader:
         message = complete_attachments(self, message, graph=True)
         result = graph_to_record(message)
         def addresses(items):
-            return [{"name": x.get("emailAddress", {}).get("name", ""),
-                     "address": x.get("emailAddress", {}).get("address", "")} for x in items or []]
+            return [{"name": (x.get("emailAddress") or {}).get("name", ""),
+                     "address": (x.get("emailAddress") or {}).get("address", "")} for x in items or []]
         result.update(bcc=addresses(message.get("bccRecipients")), reply_to=addresses(message.get("replyTo")),
                       sent=message.get("sentDateTime"), modified=message.get("lastModifiedDateTime"),
                       internet_message_id=message.get("internetMessageId", ""), attachments=[
@@ -248,6 +246,8 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
             if link:
                 validated_next_link(link, reader.base_url + "/", reader.base_url)
         if path == initial_path and params is not None and not seed_done and not response.get("_tracking"):
+            if delta_link:
+                raise OutlookCliError("Server returned ambiguous tracking state; no checkpoint was accepted.")
             fallback_snapshot = True
         initial_seed = backend == "rest" and rebuild and not seed_done and not fallback_snapshot
         continuation = next_link or (delta_link if initial_seed else None)
@@ -300,7 +300,7 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
         complete = continuation is None
         next_seed_done = seed_done or bool(initial_seed and delta_link)
         store.apply_page(backend, identity, name, current, removed=deleted,
-                         next_url=continuation, cursor=delta_link if complete else None,
+                         next_url=continuation, cursor=delta_link if complete and not fallback_snapshot else None,
                          complete=complete, seed_done=next_seed_done, snapshot_mode=fallback_snapshot)
         pages += 1
         records += len(current)
