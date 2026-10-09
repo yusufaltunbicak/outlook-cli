@@ -32,6 +32,8 @@ Search/read/thread/related/attachment metadata are offline with no auth/keychain
 network or automatic refresh. `local read` never marks mail read. The older
 network `read` still needs `--peek` for side-effect-free research. Sync explicitly
 when freshness matters, then research repeatedly without another network call.
+Research opens the existing database read-only, including while sync holds a
+write transaction. An absent store returns `not_found` (exit 5); run sync first.
 
 ## Query language and output
 

@@ -73,6 +73,8 @@ outlook local attachments MESSAGE_ID --json
 ```
 
 These reads are offline and never mark mail read: no auth/keychain or network.
+They open the existing store read-only; `not_found` (exit 5) on an absent store
+means sync is needed, subject to the user's authorization to copy mail locally.
 Carry real IDs and backend; REST/Graph IDs have different namespaces. Search is
 already compact with bounded snippets, BM25 score and `highlighted` using `[[...]]`.
 Use `--fields id,subject,snippet,highlighted` to trim further. `--view compact`
