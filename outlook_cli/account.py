@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+from functools import wraps
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +15,7 @@ import yaml
 from .config import _deep_merge, load_config
 from .constants import ACCOUNTS_CACHE_DIR, ACCOUNTS_CONFIG_DIR, ACCOUNTS_FILE, BROWSER_STATE_FILE, CACHE_DIR, CONFIG_DIR, CONFIG_FILE, ID_MAP_FILE, SCHEDULED_FILE, SIGNATURES_DIR, TOKEN_FILE
 from .exceptions import AccountError
+from .locking import atomic_write_json, file_lock
 
 ACCOUNT_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
@@ -49,8 +51,10 @@ def load_registry() -> dict[str, Any]:
 
     try:
         data = json.loads(ACCOUNTS_FILE.read_text())
-    except (json.JSONDecodeError, OSError):
-        return _empty_registry()
+    except (json.JSONDecodeError, OSError) as exc:
+        raise AccountError("Could not read the account registry. Restore accounts.json before modifying profiles.") from exc
+    if not isinstance(data, dict):
+        raise AccountError("Account registry must contain a JSON object.")
 
     accounts = data.get("accounts")
     if not isinstance(accounts, dict):
@@ -65,6 +69,8 @@ def load_registry() -> dict[str, Any]:
 
     cleaned: dict[str, dict[str, Any]] = {}
     for raw_name, meta in accounts.items():
+        if not isinstance(meta, dict):
+            continue
         try:
             name = normalize_account_name(raw_name)
         except AccountError:
@@ -82,13 +88,22 @@ def load_registry() -> dict[str, Any]:
     return {"current_account": current, "accounts": cleaned}
 
 
+def _registry_transaction(fn):
+    @wraps(fn)
+    def wrapped(*args, **kwargs):
+        with file_lock(ACCOUNTS_FILE.with_suffix(".lock")):
+            return fn(*args, **kwargs)
+    return wrapped
+
+
+@_registry_transaction
 def save_registry(registry: dict[str, Any]) -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "current_account": registry.get("current_account"),
         "accounts": registry.get("accounts", {}),
     }
-    ACCOUNTS_FILE.write_text(json.dumps(payload, indent=2))
+    atomic_write_json(ACCOUNTS_FILE, payload)
 
 
 def resolve_account_name(explicit_name: str | None = None, *, allow_missing: bool = False) -> str:
@@ -122,6 +137,7 @@ def get_current_account_name() -> str:
     return normalize_account_name(current) if current else "default"
 
 
+@_registry_transaction
 def set_current_account(name: str) -> None:
     name = normalize_account_name(name)
     ensure_account_known(name)
@@ -177,7 +193,7 @@ def get_account_paths(name: str) -> AccountPaths:
 def has_legacy_default_state() -> bool:
     return any(
         path.exists()
-        for path in (TOKEN_FILE, BROWSER_STATE_FILE, ID_MAP_FILE, SCHEDULED_FILE, SIGNATURES_DIR)
+        for path in (TOKEN_FILE, BROWSER_STATE_FILE, ID_MAP_FILE, ID_MAP_FILE.with_suffix(".sqlite3"), CACHE_DIR / "index.sqlite3", SCHEDULED_FILE, SIGNATURES_DIR)
     )
 
 
@@ -215,6 +231,7 @@ def get_account(name: str, registry: dict[str, Any] | None = None) -> dict[str, 
     return meta
 
 
+@_registry_transaction
 def bind_account(name: str, me: dict[str, Any]) -> dict[str, Any]:
     name = normalize_account_name(name)
     info = mailbox_info_from_me(me)
@@ -227,6 +244,8 @@ def bind_account(name: str, me: dict[str, Any]) -> dict[str, Any]:
             )
 
     existing = registry.get("accounts", {}).get(name, {})
+    if existing.get("mailbox_id") and not _same_mailbox(existing, info):
+        raise AccountError(f"Account profile '{name}' is already bound to a different mailbox. Remove it before binding a new mailbox.")
     now = datetime.now(timezone.utc).isoformat()
     merged = {
         "name": name,
@@ -255,6 +274,7 @@ def assert_mailbox_matches(name: str, me: dict[str, Any]) -> dict[str, Any]:
     return info
 
 
+@_registry_transaction
 def touch_account(name: str) -> None:
     name = normalize_account_name(name)
     registry = load_registry()
@@ -290,7 +310,8 @@ def list_accounts() -> list[dict[str, Any]]:
     return rows
 
 
-def remove_account(name: str) -> None:
+@_registry_transaction
+def remove_account(name: str, *, allow_interactive: bool = True) -> None:
     name = normalize_account_name(name)
     current = get_current_account_name()
     if name == current:
@@ -302,14 +323,28 @@ def remove_account(name: str) -> None:
 
     from . import auth as auth_service
 
-    auth_service.delete_stored_token(name)
+    auth_service.delete_stored_token(name, allow_interactive=allow_interactive)
+    from . import credentials
+    from .graph import SERVICE as GRAPH_SERVICE
+    try:
+        credentials.delete_password(GRAPH_SERVICE, name, allow_interactive=allow_interactive)
+    except auth_service.keyring.errors.PasswordDeleteError:
+        pass
+    except auth_service.keyring.errors.KeyringError as exc:
+        raise AccountError(f"Could not delete Graph credentials for account '{name}': {exc}") from exc
     paths = get_account_paths(name)
     if paths.uses_legacy_default:
-        for path in (TOKEN_FILE, BROWSER_STATE_FILE, ID_MAP_FILE, SCHEDULED_FILE):
+        legacy_files = [TOKEN_FILE, BROWSER_STATE_FILE, ID_MAP_FILE, SCHEDULED_FILE]
+        for database in (ID_MAP_FILE.with_suffix(".sqlite3"), CACHE_DIR / "index.sqlite3"):
+            legacy_files.extend([database, Path(str(database) + "-wal"), Path(str(database) + "-shm")])
+        for path in legacy_files:
             if path.exists():
                 path.unlink()
         if SIGNATURES_DIR.exists():
             shutil.rmtree(SIGNATURES_DIR)
+        for directory in (CACHE_DIR / "operations", CACHE_DIR / "http-slots"):
+            if directory.exists():
+                shutil.rmtree(directory)
     else:
         if paths.cache_dir.exists():
             shutil.rmtree(paths.cache_dir)
@@ -327,6 +362,8 @@ def load_account_config(name: str) -> dict[str, Any]:
     if profile_config.exists():
         with profile_config.open() as f:
             user_cfg = yaml.safe_load(f) or {}
+        if not isinstance(user_cfg, dict):
+            raise AccountError("Profile config must contain a YAML mapping.")
         _deep_merge(cfg, user_cfg)
     return cfg
 

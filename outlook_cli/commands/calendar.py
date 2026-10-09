@@ -6,6 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 import click
 
+from ..recipients import normalize_recipients
+from ..serialization import pagination_options
+from ._batch import run_items
+
 from ._common import (
     _get_client,
     _handle_api_error,
@@ -206,6 +210,7 @@ def calendar(days: int, cal_name: str | None, as_json: bool, tz_str: str | None,
         start=start_utc.isoformat(),
         end=end_utc.isoformat(),
         calendar_name=cal_name,
+        **pagination_options(),
     )
 
     if _wants_json(as_json):
@@ -279,7 +284,7 @@ def event_create(
     """
     start_dt = _parse_event_time(start)
     end_dt = _parse_event_time(end)
-    attendees = list(attendee) if attendee else None
+    attendees = normalize_recipients(attendee, field="attendee") or None
 
     recurrence = None
     if repeat:
@@ -362,36 +367,55 @@ def event_update(
     add_attendee: tuple, remove_attendee: tuple, as_json: bool, account_name: str | None,
 ):
     """Update a calendar event."""
-    client = _get_client()
-
-    if add_attendee:
-        client.add_event_attendees(event_id, list(add_attendee))
-        print_success(f"Added {len(add_attendee)} attendee(s) to event #{event_id}")
-    if remove_attendee:
-        client.remove_event_attendees(event_id, list(remove_attendee))
-        print_success(f"Removed {len(remove_attendee)} attendee(s) from event #{event_id}")
-
+    from ..exceptions import PartialFailureError, error_code_for_exception
+    add_attendee = normalize_recipients(add_attendee, field="add-attendee")
+    remove_attendee = normalize_recipients(remove_attendee, field="remove-attendee")
     kwargs: dict = {}
-    if subject:
+    if subject is not None:
         kwargs["subject"] = subject
-    if start:
+    if start is not None:
         kwargs["start"] = _parse_event_time(start)
-    if end:
+    if end is not None:
         kwargs["end"] = _parse_event_time(end)
-    if location:
+    if location is not None:
         kwargs["location"] = location
-    if body:
+    if body is not None:
         kwargs["body"] = body
-
-    if kwargs:
-        kwargs["timezone"] = cfg.get("timezone", "UTC")
-        ev = client.update_event(event_id, **kwargs)
-        if _wants_json(as_json):
-            click.echo(to_json_envelope(ev))
-        else:
-            print_success(f"Event #{event_id} updated: {ev.subject}")
-    elif not add_attendee and not remove_attendee:
-        print_error("No changes specified. Use --subject, --start, --end, --location, --body, --add-attendee, --remove-attendee.")
+    if not kwargs and not add_attendee and not remove_attendee:
+        raise click.UsageError("No changes specified. Use --subject, --start, --end, --location, --body, --add-attendee, --remove-attendee.")
+    maybe_dry_run("event-update", {"event_id": event_id, **kwargs, "add_attendee": add_attendee, "remove_attendee": remove_attendee})
+    client = _get_client()
+    completed = []
+    ev = None
+    stage = ""
+    try:
+        if add_attendee:
+            stage = "add-attendees"
+            client.add_event_attendees(event_id, add_attendee)
+            completed.append(stage)
+            print_success(f"Added {len(add_attendee)} attendee(s) to event #{event_id}")
+        if remove_attendee:
+            stage = "remove-attendees"
+            client.remove_event_attendees(event_id, remove_attendee)
+            completed.append(stage)
+            print_success(f"Removed {len(remove_attendee)} attendee(s) from event #{event_id}")
+        if kwargs:
+            stage = "update"
+            kwargs["timezone"] = cfg.get("timezone", "UTC")
+            ev = client.update_event(event_id, **kwargs)
+            completed.append(stage)
+    except Exception as exc:
+        if completed:
+            raise PartialFailureError(
+                "Event update stopped after some changes were applied",
+                completed=len(completed),
+                failures=[{"id": event_id, "operation": stage, "completed_operations": completed, "code": error_code_for_exception(exc), "message": str(exc)}],
+            ) from exc
+        raise
+    if _wants_json(as_json):
+        click.echo(to_json_envelope(ev if ev is not None else {"id": event_id}, meta={"completed_operations": completed}))
+    elif ev is not None:
+        print_success(f"Event #{event_id} updated: {ev.subject}")
 
 
 @click.command("event-delete")
@@ -410,8 +434,12 @@ def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | 
         "event-delete",
         {"event_ids": list(event_ids), "series": series},
     )
+    if not yes:
+        ids_text = ", ".join(f"#{eid}" for eid in event_ids)
+        scope = "events and their entire recurring series" if series else "events"
+        confirm_action(f"Delete {scope} {ids_text}?", action=f"delete {scope} {ids_text}")
     client = _get_client()
-    for eid in event_ids:
+    def action(eid):
         if series:
             ev = client.get_event(eid)
             if ev.series_master_id:
@@ -423,15 +451,13 @@ def event_delete(event_ids: tuple, series: bool, yes: bool, account_name: str | 
             else:
                 target_id = ev.id
                 label = f"event #{eid} (not a recurring event)"
-            if not yes:
-                confirm_action(f"Delete {label}?", action=f"delete {label}")
             client._delete(f"/events/{target_id}")
             print_success(f"Deleted {label}")
         else:
-            if not yes:
-                confirm_action(f"Delete event #{eid}?", action=f"delete event #{eid}")
             client.delete_event(eid)
             print_success(f"Event #{eid} deleted")
+        return {"status": "deleted", "series": series}
+    return run_items(event_ids, "event-delete", action)
 
 
 @click.command("event-instances")
@@ -451,6 +477,7 @@ def event_instances(event_id: str, days: int, as_json: bool, tz_str: str | None,
         event_id,
         start=now.isoformat(),
         end=end.isoformat(),
+        **pagination_options(),
     )
     if _wants_json(as_json):
         click.echo(to_json_envelope(events, tz=tz))
@@ -471,6 +498,7 @@ def event_instances(event_id: str, days: int, as_json: bool, tz_str: str | None,
 @_handle_api_error
 def event_respond(event_id: str, response: str, comment: str, silent: bool, account_name: str | None):
     """Respond to a meeting invitation (accept/decline/tentative)."""
+    maybe_dry_run("event-respond", {"event_id": event_id, "response": response, "comment": comment, "silent": silent})
     response_map = {
         "accept": "accept",
         "decline": "decline",
@@ -517,7 +545,7 @@ def free_busy(attendees: str, date: str, start_hour: int, end_hour: int, duratio
     ATTENDEES: comma-separated emails. DATE: YYYY-MM-DD, today, or tomorrow.
     """
     tz = _resolve_output_tz(tz_str)
-    addr_list = [a.strip() for a in attendees.split(",")]
+    addr_list = normalize_recipients(attendees, field="attendees", required=True)
 
     if date.lower() == "today":
         d = datetime.now()

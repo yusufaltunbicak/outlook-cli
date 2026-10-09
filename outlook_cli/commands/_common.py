@@ -6,6 +6,7 @@ import os
 import sys
 import time
 from collections.abc import MutableMapping
+from contextlib import redirect_stdout
 from copy import deepcopy
 from pathlib import Path
 from typing import Iterator
@@ -14,12 +15,13 @@ import click
 import httpx
 
 from .. import account as account_service
-from ..auth import _decode_exp, get_token as auth_get_token, login as auth_login, verify_token
+from ..auth import refresh_token as auth_refresh_token, _decode_exp, get_token as auth_get_token, login as auth_login, verify_token
 from ..client import OutlookClient
 from ..exceptions import (
     AccountError,
     AuthRequiredError,
     OutlookCliError,
+    PartialFailureError,
     ResourceNotFoundError,
     TokenExpiredError,
     error_code_for_exception,
@@ -59,7 +61,14 @@ class ConfigProxy(MutableMapping[str, object]):
 
     def _data(self) -> dict:
         account_name = self._selected_account()
-        data = deepcopy(account_service.load_account_config(account_name))
+        ctx = _root_context()
+        if ctx is not None:
+            cache = ctx.meta.setdefault("outlook_config", {})
+            if account_name not in cache:
+                cache[account_name] = account_service.load_account_config(account_name)
+            data = deepcopy(cache[account_name])
+        else:
+            data = deepcopy(account_service.load_account_config(account_name))
         overrides = self._overrides.get(account_name)
         if overrides:
             data.update(overrides)
@@ -97,7 +106,12 @@ def _exit_with_error(exc: Exception, message: str | None = None, *, error_code: 
     """Emit a user-facing error and exit with a stable code."""
     text = message or str(exc)
     if _is_json_mode():
-        click.echo(error_json(error_code or error_code_for_exception(exc), text))
+        if isinstance(exc, PartialFailureError):
+            click.echo(to_json_envelope({"completed": exc.completed, "failures": exc.failures,
+                "checkpoint": exc.checkpoint}, ok=False, meta={"partial": bool(exc.completed)},
+                error={"code": error_code or error_code_for_exception(exc), "message": text}))
+        else:
+            click.echo(error_json(error_code or error_code_for_exception(exc), text))
     else:
         print_error(text)
     raise click.exceptions.Exit(exit_code_for_exception(exc))
@@ -140,7 +154,8 @@ def confirm_action(prompt: str, *, yes: bool = False, action: str | None = None)
     if is_no_input_mode() or not _stdin_is_tty():
         action_text = action or prompt.rstrip(" ?")
         raise click.UsageError(f"Refusing to {action_text} without --yes (non-interactive).")
-    click.confirm(prompt, abort=True)
+    with redirect_stdout(sys.stderr):
+        click.confirm(prompt, abort=True, err=True)
 
 
 def maybe_dry_run(op: str, request: dict | None = None) -> None:
@@ -190,7 +205,7 @@ def get_account_name(account_name: str | None = None, *, allow_missing: bool = F
 
 
 def get_token(account_name: str | None = None) -> str:
-    return auth_get_token(get_account_name(account_name))
+    return auth_get_token(get_account_name(account_name), allow_interactive=not is_no_input_mode())
 
 
 def do_login(
@@ -207,29 +222,43 @@ def do_login(
         account_name=selected,
         allow_create=allow_create,
         token=token,
+        allow_interactive=not is_no_input_mode(),
     )
+
+
+def _invocation_clients() -> dict:
+    ctx = _root_context()
+    if ctx is None:
+        return _client_cache
+    return ctx.meta.setdefault("outlook_clients", {})
 
 
 def _get_client(account_name: str | None = None) -> OutlookClient:
     selected = get_account_name(account_name)
+    cache = _invocation_clients()
     try:
-        client = _client_cache.get(selected)
+        client = cache.get(selected)
         if client is not None:
             current_token = getattr(client, "_token", getattr(client, "token", ""))
-            refreshed = _check_token_expiry(current_token, selected)
-            if refreshed == current_token:
+            token = _check_token_expiry(current_token, selected)
+            if token == current_token:
                 return client
-            _client_cache[selected] = OutlookClient(refreshed, account_name=selected)
-            account_service.touch_account(selected)
-            return _client_cache[selected]
-
-        token = _check_token_expiry(get_token(selected), selected)
+            if hasattr(client, "close"):
+                client.close()
+        else:
+            token = _check_token_expiry(get_token(selected), selected)
+        allow_interactive = not is_no_input_mode()
+        client = OutlookClient(token, account_name=selected,
+            refresh=lambda: auth_refresh_token(client._token, selected,
+                allow_interactive=allow_interactive))
+        cache[selected] = client
+        ctx = _root_context()
+        if ctx is not None:
+            ctx.call_on_close(client.close)
+        account_service.touch_account(selected)
+        return client
     except (AuthRequiredError, RuntimeError, AccountError, ValueError) as exc:
         _exit_with_error(exc)
-
-    _client_cache[selected] = OutlookClient(token, account_name=selected)
-    account_service.touch_account(selected)
-    return _client_cache[selected]
 
 
 def _is_piped() -> bool:
@@ -239,18 +268,20 @@ def _is_piped() -> bool:
 
 def _wants_json(as_json: bool) -> bool:
     """True if JSON output is needed: explicit --json flag OR piped stdout."""
-    return as_json or _is_piped()
+    ctx = _root_context()
+    current = click.get_current_context(silent=True)
+    return as_json or bool(current and getattr(current, "_outlook_json_mode", False)) or bool(ctx and isinstance(ctx.obj, dict) and ctx.obj.get("json")) or _is_piped()
 
 
 def _is_json_mode() -> bool:
     """Check JSON mode from Click context (used by error handler)."""
     ctx = click.get_current_context(silent=True)
     explicit = bool(ctx and ctx.params.get("as_json"))
-    return explicit or _is_piped()
+    return _wants_json(explicit)
 
 
 def _handle_api_error(fn):
-    """Decorator to catch common API errors. Auto re-login on 401."""
+    """Format errors; authentication retries happen only at the HTTP request."""
     import functools
 
     @functools.wraps(fn)
@@ -261,27 +292,9 @@ def _handle_api_error(fn):
             raise
         except click.exceptions.Exit:
             raise
-        except TokenExpiredError:
-            selected = get_account_name()
-            if _is_json_mode():
-                click.echo("Token expired. Attempting re-login...", err=True)
-            else:
-                print_error("Token expired. Attempting re-login...")
-            try:
-                login_kwargs = {"account_name": selected} if selected != "default" or _ctx_account_name() else {}
-                do_login(**login_kwargs)
-                if _is_json_mode():
-                    click.echo("Re-login successful. Retrying...", err=True)
-                else:
-                    print_success("Re-login successful. Retrying...")
-                _client_cache.pop(selected, None)
-                return fn(*args, **kwargs)
-            except Exception:
-                _exit_with_error(
-                    AuthRequiredError("Auto re-login failed. Run: outlook login --force"),
-                    "Auto re-login failed. Run: outlook login --force",
-                    error_code="auth_failed",
-                )
+        except TokenExpiredError as exc:
+            # Never replay a command: earlier mutations or consumed stdin cannot be undone.
+            _exit_with_error(exc)
         except click.ClickException as exc:
             if _is_json_mode():
                 click.echo(error_json(error_code_for_exception(exc), exc.format_message()))
@@ -306,14 +319,8 @@ def _check_token_expiry(token: str, account_name: str, *, buffer_seconds: int = 
     if env_token and env_token == token:
         return token
 
-    if _is_json_mode():
-        click.echo("Token expiring soon. Re-authenticating...", err=True)
-    else:
-        print_error("Token expiring soon. Re-authenticating...")
-
-    login_kwargs = {"account_name": account_name} if account_name != "default" or _ctx_account_name() else {}
-    _client_cache.pop(account_name, None)
-    return do_login(**login_kwargs)
+    click.echo("Token expiring soon. Re-authenticating...", err=True)
+    return auth_refresh_token(token, account_name, allow_interactive=not is_no_input_mode())
 
 
 def get_category_color_map(client: OutlookClient, items: list | None = None) -> dict[str, int]:

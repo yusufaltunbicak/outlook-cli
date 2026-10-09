@@ -5,10 +5,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 import click
+
+from ..recipients import normalize_recipients
 from rich.table import Table
 
 from ._common import (
     _get_client,
+    get_account_name,
     _handle_api_error,
     _wants_json,
     account_option,
@@ -93,7 +96,7 @@ def _print_schedule_entries(entries: list[dict]) -> None:
         except (ValueError, AttributeError):
             sched_display = sched
         has_draft = bool(entry.get("message_id"))
-        src_tag = "[cyan]draft[/cyan]" if has_draft else "[dim]queued[/dim]"
+        src_tag = "[cyan]draft[/cyan]" if has_draft else "[yellow]unverified[/yellow]"
         table.add_row(str(i), to_str[:28], entry.get("subject", "")[:50], sched_display, src_tag)
 
     console.print(table)
@@ -133,11 +136,11 @@ def schedule(to: str, subject: str, body: str | None, at: str | None, cc: tuple,
 
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name:
-        sig_html = get_signature(sig_name)
+        sig_html = get_signature(sig_name, account_name=get_account_name(account_name))
         body, is_html = append_signature(body, sig_html, is_html)
 
-    to_list = [addr.strip() for addr in to.split(",")]
-    cc_list = list(cc) if cc else None
+    to_list = normalize_recipients([to, *getattr(click.get_current_context(), "_outlook_extra_to", ())], field="TO", required=True)
+    cc_list = normalize_recipients(cc, field="CC") or None
     maybe_dry_run(
         "schedule",
         {
@@ -210,16 +213,15 @@ def schedule_list(as_json: bool, account_name: str | None):
 def schedule_cancel(index: int, yes: bool, account_name: str | None):
     """Cancel a scheduled email by its list number.
 
-    For draft entries: deletes the draft from server (prevents sending).
-    For queued entries: removes local tracking only.
+    Deletes the verified server draft before removing local tracking.
+    Legacy entries without a verified draft ID must be checked in Outlook.
     Run schedule-list to see numbers.
     """
     maybe_dry_run("schedule-cancel", {"index": index})
     client = _get_client()
     entries = client.get_scheduled_list()
     if index < 1 or index > len(entries):
-        print_error(f"Invalid index #{index}. Run 'outlook schedule-list' to see entries.")
-        return
+        raise click.BadParameter(f"Invalid index #{index}. Run 'outlook schedule-list' to see entries.")
 
     entry = entries[index - 1]
     if not yes:
@@ -228,11 +230,12 @@ def schedule_cancel(index: int, yes: bool, account_name: str | None):
         console.print(f"  [bold]Scheduled:[/bold] {entry['scheduled_at']}")
         confirm_action(f"Remove scheduled entry #{index}?", action=f"remove scheduled entry #{index}")
 
-    result = client.cancel_scheduled_entry(index)
+    result = client.cancel_scheduled_entry(index, expected_tracking_id=entry.get("tracking_id"))
     if result and result.get("server_deleted"):
         print_success(f"Scheduled email #{index} cancelled and draft deleted: {entry['subject']}")
     else:
         print_success(f"Scheduled entry #{index} removed: {entry['subject']}")
+    return {"status": "cancelled", "index": index, "result": result}
 
 
 @click.command(name="schedule-draft")
@@ -268,3 +271,4 @@ def schedule_draft(message_id: str, at: str, yes: bool, account_name: str | None
 
     local_send = send_at.astimezone(datetime.now().astimezone().tzinfo)
     print_success(f"Draft #{message_id} scheduled for {local_send.strftime('%Y-%m-%d %H:%M')}")
+    return {"status": "scheduled", "id": message_id, "scheduled_at": send_at.isoformat()}

@@ -7,7 +7,7 @@ import webbrowser
 import click
 
 from ..exceptions import OutlookCliError
-from ._common import _get_client, _handle_api_error, account_option, print_success
+from ._common import _get_client, _handle_api_error, account_option, print_success, _wants_json, to_json_envelope, maybe_dry_run
 
 
 @click.command("open")
@@ -17,11 +17,16 @@ from ._common import _get_client, _handle_api_error, account_option, print_succe
 @_handle_api_error
 def open_item(item_id: str, print_url: bool, account_name: str | None):
     """Open a message or event in Outlook on the web."""
+    if not print_url:
+        maybe_dry_run("open", {"item_id": item_id})
     client = _get_client(account_name)
     kind, url = client.get_open_target(item_id)
 
     if print_url:
-        click.echo(url)
+        if _wants_json(False):
+            click.echo(to_json_envelope({"kind": kind, "url": url}))
+        else:
+            click.echo(url)
         return
 
     if not webbrowser.open(url):
@@ -29,3 +34,4 @@ def open_item(item_id: str, print_url: bool, account_name: str | None):
 
     label = f"#{item_id}" if item_id.isdigit() else item_id
     print_success(f"Opened {kind} {label} in browser")
+    return {"kind": kind, "url": url, "status": "opened"}

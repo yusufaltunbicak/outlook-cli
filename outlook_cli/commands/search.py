@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import click
 
+from ..serialization import message_fetch_options
+
 from ._common import (
     _get_client,
     _handle_api_error,
@@ -28,7 +30,7 @@ from ._common import (
 def search(query: str, max_count: int, as_json: bool, output: str | None, account_name: str | None):
     """Search messages."""
     client = _get_client()
-    messages = client.search_messages(query, top=max_count)
+    messages = client.search_messages(query, top=max_count, **message_fetch_options())
 
     if _wants_json(as_json):
         if output:

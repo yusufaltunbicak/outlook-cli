@@ -52,7 +52,7 @@ def login(force: bool, debug: bool, with_token: bool, account_name: str | None):
         if verify_token(token):
             print_success(f"Logged in successfully for account '{selected}'. Token cached.")
         else:
-            print_error("Login completed but token verification failed.")
+            raise RuntimeError("Login completed but token verification failed.")
     except click.exceptions.Exit:
         raise
     except (RuntimeError, ValueError) as e:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import click
 
+from ..serialization import message_fetch_options
+
 from ._common import (
     _get_client,
     _handle_api_error,
@@ -82,6 +84,7 @@ def folder(
         filter_has_attachments=has_attachments,
         filter_category=category,
         filter_no_category=no_category,
+        **message_fetch_options(),
     )
 
     if _wants_json(as_json):

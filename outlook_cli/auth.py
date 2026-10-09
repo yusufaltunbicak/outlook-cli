@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import time
 from base64 import urlsafe_b64decode
 from pathlib import Path
@@ -13,29 +14,44 @@ import keyring
 import keyring.errors
 
 from . import account as account_service
+from . import credentials
 from .constants import BASE_URL, KEYRING_SERVICE_NAME, OWA_URL, USER_AGENT
 from .exceptions import AccountError, AuthRequiredError, TokenExpiredError
+from .locking import atomic_write_json, file_lock
+
+def _diagnostic(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
 
 TOKEN_STORAGE_BACKEND = "keyring"
 TOKEN_STORAGE_VERSION = 1
 
 
-def get_token(account_name: str | None = None) -> str:
-    """Return a valid bearer token for the selected account."""
+def get_token(account_name: str | None = None, *, allow_interactive: bool = True) -> str:
+    """Return a token, serializing browser refreshes within each profile."""
     selected = account_service.resolve_account_name(account_name)
-
     env_token = os.environ.get("OUTLOOK_TOKEN")
     if env_token:
         _assert_token_matches_account(env_token, selected, source="OUTLOOK_TOKEN")
         return env_token
-
-    cached = _load_cached_token() if account_name is None else _load_cached_token(account_name)
+    cached = _load_cached_token(selected, allow_interactive=allow_interactive)
     if cached:
         return cached
+    return refresh_token("", selected, allow_interactive=allow_interactive)
 
-    if account_name is None:
-        return login()
-    return login(account_name=selected)
+
+def refresh_token(previous: str, account_name: str, *, allow_interactive: bool = True) -> str:
+    if os.environ.get("OUTLOOK_TOKEN"):
+        raise AuthRequiredError("OUTLOOK_TOKEN was rejected or expired. Replace it or run outlook login without OUTLOOK_TOKEN.")
+    paths = account_service.get_account_paths(account_name)
+    with file_lock(paths.cache_dir / "refresh.lock", timeout=650):
+        # Another process may have refreshed while this one waited for the lock.
+        cached = _load_cached_token(account_name, allow_interactive=allow_interactive)
+        if cached and cached != previous:
+            return cached
+        if not allow_interactive:
+            raise AuthRequiredError("Authentication required in --no-input mode. Run: outlook login")
+        return login(account_name=account_name)
 
 
 def login(
@@ -44,6 +60,7 @@ def login(
     account_name: str | None = None,
     allow_create: bool = False,
     token: str | None = None,
+    allow_interactive: bool = True,
 ) -> str:
     """Authenticate and cache a bearer token.
 
@@ -68,8 +85,11 @@ def login(
         me = _get_me_for_token(token)
         account_service.assert_mailbox_matches(selected, me)
         mailbox_info = account_service.bind_account(selected, me)
-        _save_token(token, selected, mailbox_info)
+        _save_token(token, selected, mailbox_info, allow_interactive=allow_interactive)
         return token
+
+    if not allow_interactive:
+        raise AuthRequiredError("Browser login is disabled in --no-input mode. Run: outlook login")
 
     # Otherwise, launch browser to capture token
     from playwright.sync_api import sync_playwright
@@ -83,6 +103,11 @@ def login(
     if not paths.uses_legacy_default:
         paths.config_dir.mkdir(parents=True, exist_ok=True)
 
+    browser_config = account_service.load_account_config(selected).get("browser", {})
+    timeout = float(browser_config.get("timeout", 120))
+    if not 0 < timeout <= 600:
+        raise AccountError("browser.timeout must be between 0 and 600 seconds.")
+
     captured_token: list[str] = []
     seen_urls: list[str] = []
 
@@ -92,57 +117,58 @@ def login(
             token = auth.split(" ", 1)[1]
             if debug:
                 seen_urls.append(request.url[:120])
-                print(f"  [debug] Bearer token in: {request.url[:120]}")
+                _diagnostic(f"  [debug] Bearer token in: {request.url[:120]}")
             if len(token) > 100:
                 captured_token.append(token)
                 if debug:
-                    print(f"  [debug] Captured token ({len(token)} chars)")
+                    _diagnostic(f"  [debug] Captured token ({len(token)} chars)")
 
     with sync_playwright() as p:
         launch_args: dict[str, Any] = {}
         if paths.browser_state_file.exists() and not force:
             launch_args["storage_state"] = str(paths.browser_state_file)
 
-        browser = p.chromium.launch(headless=False)
-        context = browser.new_context(user_agent=USER_AGENT, **launch_args)
-        context.on("request", _intercept_request)
+        browser = p.chromium.launch(headless=bool(browser_config.get("headless", False)), timeout=timeout * 1000)
+        try:
+            context = browser.new_context(user_agent=USER_AGENT, **launch_args)
+            context.on("request", _intercept_request)
 
-        page = context.new_page()
-        print("Opening Outlook... Log in and wait for your inbox to load.")
-        print("The browser will close automatically once the token is captured.")
-        page.goto(OWA_URL, wait_until="domcontentloaded")
+            page = context.new_page()
+            _diagnostic("Opening Outlook... Log in and wait for your inbox to load.")
+            _diagnostic("The browser will close automatically once the token is captured.")
+            page.goto(OWA_URL, wait_until="domcontentloaded", timeout=timeout * 1000)
 
-        deadline = time.time() + 120
-        while not captured_token and time.time() < deadline:
-            try:
-                page.wait_for_timeout(2000)
-            except Exception:
-                break
-
-            if not captured_token and time.time() > deadline - 95:
+            deadline = time.monotonic() + timeout
+            while not captured_token and time.monotonic() < deadline:
                 try:
-                    page.evaluate(
-                        """
-                        fetch('/api/v2.0/me', {credentials: 'include'})
-                            .catch(() => {});
-                        """
-                    )
+                    page.wait_for_timeout(2000)
                 except Exception:
-                    pass
+                    break
 
-        try:
-            context.storage_state(path=str(paths.browser_state_file))
-            _chmod_600(paths.browser_state_file)
-        except Exception:
-            pass
+                if not captured_token and time.monotonic() > deadline - max(timeout - 25, 0):
+                    try:
+                        page.evaluate(
+                            """
+                            fetch('/api/v2.0/me', {credentials: 'include'})
+                                .catch(() => {});
+                            """
+                        )
+                    except Exception:
+                        pass
 
-        try:
-            browser.close()
-        except Exception:
-            pass
+            try:
+                context.storage_state(path=str(paths.browser_state_file))
+                _chmod_600(paths.browser_state_file)
+            except Exception:
+                pass
+        finally:
+            try:
+                browser.close()
+            except Exception:
+                pass
 
     if debug and seen_urls:
-        print(f"\n  [debug] Total requests with Bearer: {len(seen_urls)}")
+        _diagnostic(f"\n  [debug] Total requests with Bearer: {len(seen_urls)}")
 
     if not captured_token:
         raise AuthRequiredError(
@@ -163,51 +189,38 @@ def login(
 def _pick_best_token(tokens: list[str], debug: bool = False) -> str:
     """Try each token against known endpoints. Prefer one that can read mail."""
     candidates: list[tuple[str, str]] = []
-    for token in tokens:
+    probe_deadline = time.monotonic() + 60
+    for token in tokens[:8]:
         aud = _decode_audience(token)
         candidates.append((token, aud))
 
     if debug:
         for token, aud in candidates:
-            print(f"  [debug] Token ({len(token)} chars) audience={aud}")
+            _diagnostic(f"  [debug] Token ({len(token)} chars) audience={aud}")
 
     endpoints = [
         ("https://outlook.office.com/api/v2.0/me/messages?$top=1", "REST v2"),
         ("https://outlook.office365.com/api/v2.0/me/messages?$top=1", "REST v2 (365)"),
-        ("https://graph.microsoft.com/v1.0/me/messages?$top=1", "Graph"),
     ]
 
     for token, _aud in candidates:
         for url, label in endpoints:
+            if time.monotonic() >= probe_deadline:
+                raise AuthRequiredError("Mailbox token verification timed out. Run: outlook login")
             try:
                 resp = httpx.get(
                     url,
                     headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
-                    timeout=10,
+                    timeout=max(0.1, min(10, probe_deadline - time.monotonic())),
                 )
                 if resp.status_code == 200:
                     if debug:
-                        print(f"  [debug] Token works with {label}!")
+                        _diagnostic(f"  [debug] Token works with {label}!")
                     return token
             except httpx.HTTPError:
                 continue
 
-    for token, _aud in candidates:
-        for base in ("https://outlook.office.com/api/v2.0", "https://graph.microsoft.com/v1.0"):
-            try:
-                resp = httpx.get(
-                    f"{base}/me",
-                    headers={"Authorization": f"Bearer {token}", "User-Agent": USER_AGENT},
-                    timeout=10,
-                )
-                if resp.status_code == 200:
-                    if debug:
-                        print(f"  [debug] Token works for /me at {base} (no mail access though)")
-                    return token
-            except httpx.HTTPError:
-                continue
-
-    return max(tokens, key=len)
+    raise AuthRequiredError("None of the captured tokens could access the mailbox. Run: outlook login --force")
 
 
 def _decode_audience(token: str) -> str:
@@ -236,7 +249,7 @@ def verify_token(token: str) -> bool:
         return False
 
 
-def _load_cached_token(account_name: str | None = None) -> str | None:
+def _load_cached_token(account_name: str | None = None, *, allow_interactive: bool = True) -> str | None:
     selected = account_service.resolve_account_name(account_name)
     token_file = account_service.get_account_paths(selected).token_file
     if not token_file.exists():
@@ -248,6 +261,8 @@ def _load_cached_token(account_name: str | None = None) -> str | None:
         return None
 
     if "token" in data:
+        if not allow_interactive:
+            raise AuthRequiredError("Legacy token storage requires interactive migration. Run: outlook login")
         token = data["token"]
         info = {
             "mailbox_id": data.get("mailbox_id"),
@@ -256,10 +271,10 @@ def _load_cached_token(account_name: str | None = None) -> str | None:
         }
         _save_token(token, selected, info)
         data = _load_token_metadata(token_file) or {}
-    token = _load_token_secret(selected)
     expires_at = data.get("expires_at", 0)
     if time.time() > expires_at - 300:
         return None
+    token = _load_token_secret(selected, allow_interactive=allow_interactive)
 
     cached_mailbox = {
         "mailbox_id": data.get("mailbox_id"),
@@ -274,12 +289,12 @@ def _load_cached_token(account_name: str | None = None) -> str | None:
     return token
 
 
-def _save_token(token: str, account_name: str | None = None, mailbox_info: dict[str, str] | None = None) -> None:
+def _save_token(token: str, account_name: str | None = None, mailbox_info: dict[str, str] | None = None, *, allow_interactive: bool = True) -> None:
     selected = account_service.resolve_account_name(account_name)
     token_file = account_service.get_account_paths(selected).token_file
     token_file.parent.mkdir(parents=True, exist_ok=True)
     info = mailbox_info or {}
-    _store_token_secret(selected, token)
+    _store_token_secret(selected, token, allow_interactive=allow_interactive)
     data = {
         "storage_backend": TOKEN_STORAGE_BACKEND,
         "storage_version": TOKEN_STORAGE_VERSION,
@@ -288,14 +303,14 @@ def _save_token(token: str, account_name: str | None = None, mailbox_info: dict[
         "email": info.get("email"),
         "display_name": info.get("display_name"),
     }
-    token_file.write_text(json.dumps(data))
+    atomic_write_json(token_file, data)
     _chmod_600(token_file)
 
 
-def delete_stored_token(account_name: str | None = None) -> None:
+def delete_stored_token(account_name: str | None = None, *, allow_interactive: bool = True) -> None:
     selected = account_service.resolve_account_name(account_name, allow_missing=True)
     try:
-        keyring.delete_password(KEYRING_SERVICE_NAME, _keyring_username(selected))
+        credentials.delete_password(KEYRING_SERVICE_NAME, _keyring_username(selected), allow_interactive=allow_interactive)
     except keyring.errors.PasswordDeleteError:
         pass
     except keyring.errors.KeyringError as exc:
@@ -315,18 +330,18 @@ def _keyring_username(account_name: str) -> str:
     return f"token:{account_name}"
 
 
-def _store_token_secret(account_name: str, token: str) -> None:
+def _store_token_secret(account_name: str, token: str, *, allow_interactive: bool = True) -> None:
     try:
-        keyring.set_password(KEYRING_SERVICE_NAME, _keyring_username(account_name), token)
+        credentials.set_password(KEYRING_SERVICE_NAME, _keyring_username(account_name), token, allow_interactive=allow_interactive)
     except keyring.errors.KeyringError as exc:
         raise AccountError(
             f"Could not store token securely for account '{account_name}'. Check keyring availability."
         ) from exc
 
 
-def _load_token_secret(account_name: str) -> str:
+def _load_token_secret(account_name: str, *, allow_interactive: bool = True) -> str:
     try:
-        token = keyring.get_password(KEYRING_SERVICE_NAME, _keyring_username(account_name))
+        token = credentials.get_password(KEYRING_SERVICE_NAME, _keyring_username(account_name), allow_interactive=allow_interactive)
     except keyring.errors.KeyringError as exc:
         raise AccountError(
             f"Could not read stored token for account '{account_name}'. Check keyring availability."

@@ -13,6 +13,8 @@ import httpx
 from . import account as account_service
 from .constants import BASE_URL
 from .exceptions import ResourceNotFoundError
+from .transport import request_json
+from .category_manager import _session, _request
 
 
 def _signatures_dir(account_name: str | None = None) -> Path:
@@ -62,32 +64,18 @@ def pull_signature(token: str) -> tuple[str, str]:
 
     Returns (signature_html, source_subject).
     """
-    client = httpx.Client(
-        base_url=BASE_URL,
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=30,
-    )
-    try:
+    with _session(token) as (client, refresh):
         for skip in range(0, 50, 5):
-            resp = client.get(
-                "/MailFolders/SentItems/messages",
-                params={
-                    "$top": 5,
-                    "$skip": skip,
-                    "$orderby": "SentDateTime desc",
-                    "$select": "Subject,Body",
-                },
-            )
-            if resp.status_code != 200:
+            data = _request(client, "GET", f"{BASE_URL}/MailFolders/SentItems/messages",
+                params={"$top": 5, "$skip": skip, "$orderby": "SentDateTime desc",
+                    "$select": "Subject,Body"}, refresh=refresh)
+            messages = data.get("value", [])
+            if not messages:
                 break
-            for m in resp.json().get("value", []):
-                body = m.get("Body", {}).get("Content", "")
-                subject = m.get("Subject", "")
-                sig = _extract_signature(body)
+            for message in messages:
+                sig = _extract_signature(message.get("Body", {}).get("Content", ""))
                 if sig:
-                    return sig, subject
-    finally:
-        client.close()
+                    return sig, message.get("Subject", "")
     raise ResourceNotFoundError(
         "Could not find a signature in your sent emails. "
         "Send an email with your signature from Outlook first."

@@ -21,6 +21,20 @@ class OutlookCliError(Exception):
     """Base exception for all outlook-cli errors."""
 
 
+class AmbiguousMutationError(OutlookCliError):
+    """Write outcome is unknown; callers must inspect before retrying."""
+
+
+class PartialFailureError(OutlookCliError):
+    """A resumable operation stopped with explicit per-item failures."""
+
+    def __init__(self, message, *, completed=0, failures=None, checkpoint=None):
+        super().__init__(message)
+        self.completed = completed
+        self.failures = failures or []
+        self.checkpoint = str(checkpoint) if checkpoint else None
+
+
 class TokenExpiredError(OutlookCliError):
     """401 — bearer token expired or revoked."""
 
@@ -57,6 +71,8 @@ def error_code_for_exception(exc: Exception) -> str:
         return "retryable_error"
 
     mapping = {
+        AmbiguousMutationError: "ambiguous_write",
+        PartialFailureError: "partial_failure",
         TokenExpiredError: "session_expired",
         RateLimitError: "rate_limited",
         ResourceNotFoundError: "not_found",
