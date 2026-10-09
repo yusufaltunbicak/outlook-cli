@@ -101,7 +101,7 @@ def _date(value) -> str:
 
 def _terms(query: str) -> tuple[list[tuple[str, bool]], dict]:
     """Parse literal words/phrases and a small, predictable field vocabulary."""
-    pattern = re.compile(r'''(?:(?P<field>[A-Za-z]+):)?(?P<value>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s"']+)''')
+    pattern = re.compile(r'''(?:(?P<field>[A-Za-z]+):)?(?P<value>"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|(?!['"])[^\s"]+)''')
     terms, fields, end = [], {}, 0
     for match in pattern.finditer(query):
         if query[end:match.start()].strip():
@@ -433,6 +433,16 @@ class MailStore:
         return max(0, float(row[0]) - time.time()) if row else 0
 
     def status(self, backend="rest", folder=None, *, include_stats=True) -> dict:
+        owns_snapshot = not self.db.in_transaction
+        if owns_snapshot:
+            self.db.execute("BEGIN")
+        try:
+            return self._status(backend, folder, include_stats=include_stats)
+        finally:
+            if owns_snapshot:
+                self.db.rollback()
+
+    def _status(self, backend="rest", folder=None, *, include_stats=True) -> dict:
         rows = [dict(row) for row in self.db.execute("SELECT * FROM folders WHERE backend=? ORDER BY name", (backend,))]
         inventory = self.db.execute("SELECT value FROM meta WHERE key=?", ("inventory:" + backend,)).fetchone()
         live = set(json.loads(inventory[0])) if inventory else None
@@ -610,9 +620,25 @@ class MailStore:
         meta.update(returned_count=len(data), related_person=address)
         return data, meta
 
-    def attachments(self, identity: str, *, backend="rest") -> list[dict]:
-        row = self._find(identity, backend)
-        return [dict(item) for item in self.db.execute("SELECT id,name,content_type,size,is_inline FROM attachments WHERE message_rowid=? ORDER BY name,id", (row["record_id"],))]
+    def attachments(self, identity: str, *, backend="rest", include_meta=False):
+        owns_snapshot = not self.db.in_transaction
+        if owns_snapshot:
+            self.db.execute("BEGIN")
+        try:
+            row = self._find(identity, backend)
+            items = [dict(item) for item in self.db.execute("SELECT id,name,content_type,size,is_inline FROM attachments WHERE message_rowid=? ORDER BY name,id", (row["record_id"],))]
+            if not include_meta:
+                return items
+            state = self.folder_state(backend, row["folder_id"])
+            complete = bool(state.get("complete") and not state.get("pending_generation")
+                            and state.get("options_signature", "").startswith("text+attachments:v2:" + backend))
+            meta = {"local": True, "metadata_complete": complete, "returned_count": len(items)}
+            if not complete:
+                meta["reason"] = "run_local_sync_to_verify_attachment_metadata"
+            return items, meta
+        finally:
+            if owns_snapshot:
+                self.db.rollback()
 
     def compact(self) -> dict:
         """Explicit maintenance, never erase the retained legacy index."""
@@ -668,9 +694,9 @@ class MailStore:
         return {"local": True, "source_retained": True, "source": str(source), "migrated_messages": migrated, "skipped_folders": skipped, **self.status()}
 
     def purge(self):
+        targets = [Path(str(self.path) + suffix) for suffix in ("", "-wal", "-shm")]
+        if any(path.is_symlink() or (path.exists() and not path.is_file()) for path in targets):
+            raise OutlookCliError("Refusing to remove symlinks or non-regular mail-store files")
         self.close()
-        for suffix in ("", "-wal", "-shm"):
-            path = Path(str(self.path) + suffix)
-            if path.is_symlink():
-                raise OutlookCliError("Refusing to remove a symlink at the local store path")
+        for path in targets:
             path.unlink(missing_ok=True)

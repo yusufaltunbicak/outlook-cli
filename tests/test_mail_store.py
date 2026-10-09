@@ -93,6 +93,14 @@ def test_literals_do_not_become_fts_operators(store):
         store.query("has:unread")
 
 
+@pytest.mark.parametrize("query", ["İstanbul'da", '"İstanbul\'da görüşme"', "'İstanbul görüşmesi'", 'person:"O\'Connor"'])
+def test_apostrophes_inside_words_and_quoted_phrases_are_literal(store, query):
+    populate(store, [message(body="İstanbul'da görüşme; İstanbul görüşmesi", sender={"name": "O'Connor", "address": "synthetic@example.com"})])
+    assert store.query(query)[0]
+    with pytest.raises(ValueError, match="Unclosed quotation"):
+        store.query("'missing quote")
+
+
 def test_full_resume_preserves_visible_old_generation(store):
     populate(store, [message("old")])
     original_cursor = store.folder_state("rest", "inbox")["cursor"]
@@ -292,6 +300,82 @@ def test_read_and_thread_keep_one_wal_snapshot_during_promotion(tmp_path, monkey
         writer.close()
 
 
+def test_attachments_and_coverage_keep_one_snapshot_during_promotion(tmp_path, monkeypatch):
+    path = tmp_path / "mail.sqlite3"
+    writer = MailStore(path)
+
+    def replace(attachment_id):
+        writer.begin_sync("rest", "inbox", "Inbox", full=True, options_signature="text+attachments:v2:rest")
+        writer.apply_page("rest", "inbox", "Inbox", [message(attachments=[{"id": attachment_id, "name": attachment_id + ".pdf", "is_inline": False}])], complete=True)
+
+    replace("original")
+    reader = MailStore(path, readonly=True)
+    find = reader._find
+
+    def promote_after_identity(identity, backend):
+        row = find(identity, backend)
+        replace("replacement")
+        return row
+
+    monkeypatch.setattr(reader, "_find", promote_after_identity)
+    try:
+        items, meta = reader.attachments("one", include_meta=True)
+        assert [item["id"] for item in items] == ["original"]
+        assert meta["metadata_complete"]
+        assert [item["id"] for item in writer.attachments("one")] == ["replacement"]
+    finally:
+        reader.close()
+        writer.close()
+
+
+def test_standalone_status_keeps_inventory_and_counts_in_one_snapshot(tmp_path):
+    path = tmp_path / "mail.sqlite3"
+    writer = MailStore(path)
+    populate(writer, [message()])
+    writer.set_inventory("rest", {"inbox"})
+    reader = MailStore(path, readonly=True)
+    original_connection = reader.db
+
+    class PromoteBetweenReads:
+        changed = False
+
+        def __getattr__(self, name):
+            return getattr(original_connection, name)
+
+        def execute(self, statement, *arguments):
+            if statement.startswith("SELECT value FROM meta WHERE key=?") and not self.changed:
+                self.changed = True
+                populate(writer, [message(), message("two")])
+                writer.set_inventory("rest", {"inbox", "archive"})
+            return original_connection.execute(statement, *arguments)
+
+    reader.db = PromoteBetweenReads()
+    try:
+        status = reader.status()
+        assert status["message_count"] == 1
+        assert status["whole_mailbox_complete"]
+        assert writer.status()["message_count"] == 2
+        assert not writer.status()["whole_mailbox_complete"]
+    finally:
+        reader.close()
+        writer.close()
+
+
+@pytest.mark.parametrize("signature,pending,expected", [
+    ("legacy:fixture", False, False), ("text+attachments:v1:rest", False, False),
+    ("text+attachments:v2:rest", False, True), ("text+attachments:v2:rest", True, False),
+])
+def test_attachment_metadata_completeness_is_conservative(store, signature, pending, expected):
+    store.begin_sync("rest", "inbox", "Inbox", full=True, options_signature=signature)
+    store.apply_page("rest", "inbox", "Inbox", [message(has_attachments=True)], complete=True)
+    if pending:
+        store.begin_sync("rest", "inbox", "Inbox", full=False, options_signature=signature)
+    items, meta = store.attachments("one", include_meta=True)
+    assert items == []
+    assert meta["metadata_complete"] is expected
+    assert ("reason" in meta) is not expected
+
+
 def test_private_files_readonly_connection_and_purge(tmp_path):
     path = tmp_path / "private" / "mail.sqlite3"
     store = MailStore(path)
@@ -319,6 +403,25 @@ def test_symlink_store_refused(tmp_path):
     with pytest.raises(OSError):
         MailStore(link)
     assert target.read_text() == "retain"
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_direct_purge_preflights_all_sidecars_before_deleting_store(tmp_path, kind):
+    path = tmp_path / "private" / "mail.sqlite3"
+    store = MailStore(path)
+    populate(store, [message()])
+    store.close()
+    outside = tmp_path / "outside"
+    outside.write_text("retain unrelated data")
+    sidecar = Path(str(path) + "-shm")
+    if kind == "symlink":
+        sidecar.symlink_to(outside)
+    else:
+        sidecar.mkdir()
+    with pytest.raises(OutlookCliError, match="Refusing"):
+        store.purge()
+    assert path.exists()
+    assert outside.read_text() == "retain unrelated data"
 
 
 def test_persisted_cooldown_does_not_leak_cursor_in_status(store):
