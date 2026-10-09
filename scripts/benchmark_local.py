@@ -83,12 +83,14 @@ def open_legacy(path):
     return store
 
 
-def measure_store(store, *, backend, repeats, limit, match_mode=None):
+def measure_store(store, *, backend, repeats, limit, match_mode=None, folder=None):
     from outlook_cli.pagination import Page
     from outlook_cli.serialization import to_json_envelope
     results, all_times, identities = [], [], []
     for position, query in enumerate(QUERIES, 1):
         options = {"backend": backend, "limit": limit}
+        if folder is not None:
+            options["folder"] = folder
         if match_mode is not None:
             options["match_mode"] = match_mode
         timings, returned, total, output_bytes, data_bytes = [], [], [], [], []
@@ -119,6 +121,88 @@ def measure_store(store, *, backend, repeats, limit, match_mode=None):
         identities.append(row_ids)
     return {"ok": all(row["ok"] for row in results), "latency": latency(all_times),
             "queries": results}, identities
+
+
+def comparable_scope(legacy, new, *, backend, repeats, limit=25):
+    """Measure exact searches on individually matched folders, without exposing IDs.
+
+    Folder IDs are authoritative when retained. Otherwise require one unique
+    folded-name match and a one-to-one assignment. An unresolved mapping makes
+    the comparison unknown; a partial mapped sample is never advertised as fair.
+    """
+    from outlook_cli.mail_store import fold
+    old_folders = [dict(row) for row in legacy.db.execute(
+        "SELECT id,name,complete FROM folders WHERE backend=? ORDER BY id", (backend,))]
+    new_folders = [dict(row) for row in new.db.execute(
+        "SELECT id,name,complete,active_generation,pending_generation FROM folders "
+        "WHERE backend=? ORDER BY id", (backend,))]
+    by_id = {row["id"]: row for row in new_folders}
+    mapped, used, name_candidates = [], set(), []
+    # Reserve all identity matches before considering aliases, so an alias cannot
+    # claim a destination that another legacy folder matches authoritatively.
+    for old in old_folders:
+        candidate = by_id.get(old["id"])
+        if candidate is not None:
+            mapped.append((old, candidate))
+            used.add(candidate["id"])
+        else:
+            name_candidates.append(old)
+    for old in name_candidates:
+        candidates = [row for row in new_folders if fold(row["name"]) == fold(old["name"])]
+        if len(candidates) == 1 and candidates[0]["id"] not in used:
+            mapped.append((old, candidates[0]))
+            used.add(candidates[0]["id"])
+    old_count = legacy.db.execute(
+        "SELECT count(*) FROM messages WHERE backend=?", (backend,)).fetchone()[0]
+    result = {"ok": False, "scope_comparison": "unknown", "legacy_folder_count": len(old_folders),
+              "mapped_folder_count": len(mapped), "unmapped_folder_count": len(old_folders) - len(mapped),
+              "legacy_message_count": old_count, "new_message_count": None,
+              "legacy_match_mode": "literal_exact", "new_match_mode": "exact", "per_folder_limit": limit,
+              "aggregation": "medians across per-folder query p50/p95; each folder is queried separately",
+              "corpus_note": "matched folders do not imply identical snapshots; new index strips HTML and folds Turkish text"}
+    if not old_folders or len(mapped) != len(old_folders):
+        result["error"] = {"code": "scope_mapping_unknown"}
+        return result
+    result["scope_comparison"] = "matched"
+    result["new_message_count"] = sum(new.db.execute(
+        "SELECT count(*) FROM messages WHERE backend=? AND folder_id=? AND generation=?",
+        (backend, current["id"], current["active_generation"])).fetchone()[0] for _, current in mapped)
+    result["snapshot_message_counts_equal"] = old_count == result["new_message_count"]
+    result["scope_complete"] = all(old["complete"] and current["complete"] and
+                                   current["active_generation"] and not current["pending_generation"]
+                                   for old, current in mapped)
+    reports = {"legacy": [], "new": []}
+    for old, current in mapped:
+        reports["legacy"].append(measure_store(legacy, backend=backend, repeats=repeats,
+                                               limit=limit, folder=old["id"])[0])
+        reports["new"].append(measure_store(new, backend=backend, repeats=repeats,
+                                            limit=limit, folder=current["id"], match_mode="exact")[0])
+    queries = []
+    for index in range(len(QUERIES)):
+        item = {"query_id": f"q{index + 1:02d}"}
+        for label in ("legacy", "new"):
+            rows = [report["queries"][index] for report in reports[label]]
+            if any(not row["ok"] for row in rows):
+                item[label] = {"ok": False, "failed_folder_measurements": sum(not row["ok"] for row in rows)}
+                continue
+            item[label] = {"ok": True, "folder_measurements": len(rows),
+                           "median_folder_p50_ms": round(statistics.median(row["latency"]["p50_ms"] for row in rows), 3),
+                           "median_folder_p95_ms": round(statistics.median(row["latency"]["p95_ms"] for row in rows), 3),
+                           "total_matches_sum": sum(row["total_matches"]["max"] for row in rows),
+                           "returned_count_sum": sum(row["returned_count"]["max"] for row in rows),
+                           "counts_stable": all(row["total_matches"]["stable"] and row["returned_count"]["stable"] for row in rows)}
+        queries.append(item)
+    result["queries"] = queries
+    for label in ("legacy", "new"):
+        rows = [report["queries"][index] for report in reports[label]
+                for index in range(len(QUERIES)) if report["queries"][index]["ok"]]
+        result[label] = {"ok": all(report["ok"] for report in reports[label]),
+                         "folder_query_measurements": len(rows),
+                         "samples_per_folder_query": repeats,
+                         "median_folder_query_p50_ms": round(statistics.median(row["latency"]["p50_ms"] for row in rows), 3) if rows else None,
+                         "median_folder_query_p95_ms": round(statistics.median(row["latency"]["p95_ms"] for row in rows), 3) if rows else None}
+    result["ok"] = result["legacy"]["ok"] and result["new"]["ok"]
+    return result
 
 
 def private_snapshot(source, target):
@@ -232,6 +316,7 @@ def arguments():
     parser.add_argument("--outlook", default=shutil.which("outlook") or "outlook", help="Installed CLI executable")
     parser.add_argument("--backend", choices=("rest", "graph"), default="rest")
     parser.add_argument("--match", choices=("exact", "prefix", "stem"), default="prefix")
+    parser.add_argument("--comparable-scope", action="store_true", help="Also measure exact search per legacy folder matched by ID/unique folded name; limit 25 per folder")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--timeout", type=int, default=60, help="Seconds per offline CLI invocation")
     parser.add_argument("--first-full-report", type=Path, help="Read saved full-sync JSON; do not run sync")
@@ -271,6 +356,9 @@ def main():
                                   "returned_id_set_equal": a == b,
                                   "interpretation": "scope/text normalization/match mode/ranking can differ"}
                                  for old, current, a, b in zip(result["legacy_in_process"]["queries"], result["new_in_process"]["queries"], old_ids, new_ids)]
+        if args.comparable_scope:
+            result["comparable_scope"] = comparable_scope(legacy, new, backend=args.backend,
+                                                          repeats=args.repeats, limit=25)
         if args.cli_repeats:
             # Snapshots contain sensitive mail: private directories/files and automatic cleanup.
             with tempfile.TemporaryDirectory(prefix="outlook-offline-benchmark-") as scratch:
