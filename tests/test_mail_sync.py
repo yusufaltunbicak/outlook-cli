@@ -19,6 +19,7 @@ from outlook_cli.graph import GRAPH_URL
 from outlook_cli.mail_sync import (
     GraphSyncReader,
     RestReader,
+    complete_attachments,
     removed_id,
     rest_record,
     sync_folder,
@@ -505,3 +506,197 @@ def test_initial_missing_body_hydrates_before_committing_page():
     sync_folder(store, reader, FOLDER)
     assert reader.hydrate_calls == ["a"]
     assert store.commits[0]["records"][0]["body"] == "Gövde"
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_missing_expanded_attachments_fetches_only_encoded_metadata_collection(backend):
+    identity = "message/with + punctuation"
+    graph = backend == "graph"
+    path = ("/me/messages" if graph else "/messages") + "/" + quote(identity, safe="") + "/attachments"
+    attachment = {"id" if graph else "Id": "attachment-one"}
+    reader = FakeReader({path: [{"value": [attachment]}]}, backend=backend)
+    original = message(identity, backend=backend)
+
+    completed = complete_attachments(reader, original, graph=graph)
+
+    assert reader.calls == [(path, {"$select": "id,name,size,contentType,isInline" if graph else "Id,Name,Size,ContentType,IsInline"})]
+    assert completed["attachments" if graph else "Attachments"] == [attachment]
+    assert "attachments" not in original and "Attachments" not in original
+    assert all("contentbytes" not in str(params).lower() for _, params in reader.calls)
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_expanded_attachment_pages_are_all_projected_without_binary_content(backend):
+    graph = backend == "graph"
+    key = "attachments" if graph else "Attachments"
+    base = GRAPH_URL if graph else BASE_URL
+    page2 = base + "/messages/fixture/attachments?continuation=two"
+    page3 = base + "/messages/fixture/attachments?continuation=three"
+
+    def attachment(identity):
+        if graph:
+            return {"id": identity, "name": identity + ".pdf", "size": 321,
+                    "contentType": "application/pdf", "isInline": False,
+                    "contentBytes": "fixture-binary-should-not-be-stored", "@odata.type": "#fileAttachment"}
+        return {"Id": identity, "Name": identity + ".pdf", "Size": 321,
+                "ContentType": "application/pdf", "IsInline": False,
+                "ContentBytes": "fixture-binary-should-not-be-stored", "@odata.type": "#FileAttachment"}
+
+    value = message("fixture", backend=backend)
+    value.update({key: [attachment("one")], key + "@odata.nextLink": page2})
+    original = deepcopy(value)
+    fixture = FakeReader({page2: [{"value": [attachment("two")], "odata.nextLink": page3}],
+                          page3: [{"value": [attachment("three")]}]}, backend=backend)
+    adapter = GraphSyncReader(None, interval=0) if graph else RestReader(None, interval=0)
+    adapter.get = fixture.get
+
+    record = adapter.record(value)
+
+    assert fixture.calls == [(page2, None), (page3, None)]
+    assert [entry["id"] for entry in record["attachments"]] == ["one", "two", "three"]
+    assert all(entry["content_type"] == "application/pdf" and entry["size"] == 321
+               for entry in record["attachments"])
+    assert "fixture-binary-should-not-be-stored" not in str(record)
+    assert all(set(entry) == {"id", "name", "size", "content_type", "is_inline", "type"}
+               for entry in record["attachments"])
+    assert value == original
+
+
+@pytest.mark.parametrize("backend", ["rest", "graph"])
+def test_explicit_empty_attachment_expansion_needs_no_extra_read(backend):
+    graph = backend == "graph"
+    key = "attachments" if graph else "Attachments"
+    value = message("empty", backend=backend)
+    value[key] = []
+    reader = FakeReader(backend=backend)
+
+    completed = complete_attachments(reader, value, graph=graph)
+
+    assert completed[key] == []
+    assert reader.calls == []
+
+
+@pytest.mark.parametrize("unsafe_link", [
+    "https://foreign.invalid/mail/attachments?opaque=fixture-only",
+    "//foreign.invalid/mail/attachments",
+    "http://outlook.office365.com/api/v2.0/me/messages/a/attachments",
+    "https://outlook.office365.com/other/messages/a/attachments",
+    "https://user:password@outlook.office365.com/api/v2.0/me/messages/a/attachments",
+    BASE_URL + "/messages/a/attachments#fragment",
+    123,
+    {"url": BASE_URL + "/messages/a/attachments"},
+])
+def test_harmful_attachment_continuation_is_rejected_before_any_get(unsafe_link):
+    reader = FakeReader()
+    value = message("a")
+    value.update(Attachments=[], **{"Attachments@odata.nextLink": unsafe_link})
+
+    with pytest.raises(OutlookCliError):
+        complete_attachments(reader, value)
+
+    assert reader.calls == []
+
+
+@pytest.mark.parametrize("invalid_collection", ["not a list", {"Id": "attachment"}, 123])
+def test_invalid_expanded_attachment_collection_never_fetches_a_page(invalid_collection):
+    reader = FakeReader()
+    value = message("a")
+    value["Attachments"] = invalid_collection
+
+    with pytest.raises(OutlookCliError, match="collection is incomplete"):
+        complete_attachments(reader, value)
+
+    assert reader.calls == []
+
+
+@pytest.mark.parametrize("collection", [None, "wrong", {"Id": "attachment"}])
+def test_malformed_attachment_page_fails_before_any_message_checkpoint(collection):
+    store = FakeStore()
+    store.seed(rows=[{"id": "old", "subject": "previous snapshot"}])
+    value = message("a")
+    seed = link("attachment-seed")
+    path = "/messages/a/attachments"
+    reader = FakeReader({initial_path(): [{"value": [value], "_tracking": True, "@odata.deltaLink": seed}],
+                         path: [{"value": collection}]})
+    reader.record = lambda item: rest_record(complete_attachments(reader, item))
+
+    with pytest.raises(OutlookCliError, match="collection is incomplete"):
+        sync_folder(store, reader, FOLDER, full=True)
+
+    assert store.commits == []
+    assert list(store.active[("rest", FOLDER["id"])]) == ["old"]
+    assert store.folder_state("rest", FOLDER["id"])["complete"] is False
+
+
+def test_bad_later_attachment_page_does_not_partially_commit_sync_batch():
+    store = FakeStore()
+    store.seed(rows=[{"id": "old", "subject": "previous snapshot"}])
+    good, bad = message("good"), message("bad")
+    good["Attachments"] = []
+    attachment_next = BASE_URL + "/messages/bad/attachments?continuation=two"
+    bad.update(Attachments=[{"Id": "one"}], **{"Attachments@odata.nextLink": attachment_next})
+    reader = FakeReader({initial_path(): [{"value": [good, bad], "_tracking": True,
+                                          "@odata.deltaLink": link("attachment-seed")}],
+                         attachment_next: [{"value": "invalid"}]})
+    reader.record = lambda item: rest_record(complete_attachments(reader, item))
+
+    with pytest.raises(OutlookCliError, match="Invalid attachment metadata page"):
+        sync_folder(store, reader, FOLDER, full=True)
+
+    assert store.commits == []
+    assert list(store.active[("rest", FOLDER["id"])]) == ["old"]
+    assert store.staging[("rest", FOLDER["id"])] == {}
+
+
+def test_repeated_attachment_continuation_stops_before_repeating_a_request():
+    repeated = BASE_URL + "/messages/a/attachments?continuation=repeated"
+    value = message("a")
+    value.update(Attachments=[], **{"Attachments@odata.nextLink": repeated})
+    reader = FakeReader({repeated: [{"value": [{"Id": "one"}], "@odata.nextLink": repeated}]})
+
+    with pytest.raises(OutlookCliError, match="Repeated attachment continuation"):
+        complete_attachments(reader, value)
+
+    assert reader.calls == [(repeated, None)]
+    assert value["Attachments"] == []
+
+
+def test_attachment_page_budget_bounds_work_even_when_every_link_is_unique():
+    continuations = [BASE_URL + f"/messages/a/attachments?continuation={number}" for number in range(1001)]
+    reader = FakeReader({path: [{"value": [], "@odata.nextLink": continuations[index + 1]}]
+                         for index, path in enumerate(continuations[:-1])})
+    value = message("a")
+    value.update(Attachments=[], **{"Attachments@odata.nextLink": continuations[0]})
+
+    with pytest.raises(OutlookCliError, match="Attachment metadata page budget exceeded"):
+        complete_attachments(reader, value)
+
+    assert len(reader.calls) == 1000
+    assert continuations[-1] not in [path for path, _ in reader.calls]
+
+
+@pytest.mark.parametrize("saved_signature", ["text+attachments:v2:rest", signature(page_size=100)])
+def test_larger_page_size_resumes_pending_full_round_without_replacing_staged_rows(saved_signature):
+    store = FakeStore()
+    store.seed(rows=[{"id": "old", "subject": "previous snapshot"}])
+    page2, seed, final = link("resized-page2"), link("resized-seed"), link("resized-final")
+    first = FakeReader({initial_path(): [{"value": [message("a")], "_tracking": True, "@odata.nextLink": page2}]})
+    with pytest.raises(OutlookCliError, match="page budget"):
+        sync_folder(store, first, FOLDER, full=True, max_pages=1)
+    store.states[("rest", FOLDER["id"])]["options_signature"] = saved_signature
+    resumed = FakeReader({page2: [{"value": [message("b")], "@odata.deltaLink": seed}],
+                          seed: [{"value": [], "@odata.deltaLink": final}]})
+    resumed.page_size = 200
+
+    result = sync_folder(store, resumed, FOLDER)
+
+    assert result["resumed"] is True
+    assert result["mode"] == "full"
+    assert resumed.calls == [(page2, None), (seed, None)]
+    assert store.begins[-1] == {"full": True, "restart": False, "identity": FOLDER["id"]}
+    assert set(store.active[("rest", FOLDER["id"])]) == {"a", "b"}
+    state = store.folder_state("rest", FOLDER["id"])
+    assert state["options_signature"] == saved_signature
+    assert state["cursor"] == final
+    assert state["complete"] is True
+    assert state["snapshot_mode"] is False
