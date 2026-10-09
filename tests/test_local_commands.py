@@ -6,10 +6,12 @@ from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from outlook_cli import account
 from outlook_cli.cli import cli
+from outlook_cli.commands import _common as common
 from outlook_cli.commands import local as local_cmd
 from outlook_cli.exceptions import RateLimitError
 from outlook_cli.mail_store import MailStore
@@ -216,6 +218,7 @@ def test_sync_throttle_stops_other_folders_and_next_run_obeys_saved_cooldown(run
     payload = json.loads(result.stdout)
     assert payload["ok"] is False
     assert requested == ["inbox"]
+
     assert payload["data"][0]["error"]["code"] == "rate_limited"
     assert payload["meta"]["partial"] is True
     assert payload["meta"]["remaining_folders"] == 2
@@ -231,3 +234,130 @@ def test_sync_throttle_stops_other_folders_and_next_run_obeys_saved_cooldown(run
     assert retry.exit_code == 7
     assert json.loads(retry.stdout)["error"]["code"] == "rate_limited"
     assert requested == ["inbox"]
+
+
+def test_folder_discovery_throttle_persists_cooldown_before_retry(runner, mailbox_store, monkeypatch):
+    path, _ = mailbox_store
+    calls = []
+    reader = SimpleNamespace(backend="rest", requests=0, response_bytes=0)
+    monkeypatch.setattr(local_cmd, "_get_client", lambda *_: object())
+    monkeypatch.setattr(local_cmd, "RestReader", lambda *args, **kwargs: reader)
+
+    def throttled(_reader):
+        calls.append("discovery")
+        raise RateLimitError("fixture server throttle", retry_after=180)
+
+    monkeypatch.setattr(local_cmd, "discover_folders", throttled)
+    result = runner.invoke(cli, ["local", "sync", "--no-input", "--json"])
+    assert result.exit_code == 7
+    assert json.loads(result.stdout)["error"]["code"] == "rate_limited"
+    with closing(MailStore(path, readonly=True)) as store:
+        assert store.cooldown_remaining() > 170
+        assert store.status()["whole_mailbox_complete"] is True
+
+    def denied(*_args):
+        raise AssertionError("Saved cooldown must stop before authentication")
+
+    monkeypatch.setattr(local_cmd, "_get_client", denied)
+    retry = runner.invoke(cli, ["local", "sync", "--no-input", "--json"])
+    assert retry.exit_code == 7
+    assert json.loads(retry.stdout)["error"]["code"] == "rate_limited"
+    assert calls == ["discovery"]
+
+
+def test_folder_discovery_http_error_is_sanitized_and_preserves_snapshot(runner, mailbox_store, monkeypatch):
+    path, _ = mailbox_store
+    request = httpx.Request("GET", "https://outlook.office.com/api/v2.0/me/MailFolders?opaque=private-cursor",
+                            headers={"Authorization": "Bearer private-token", "Cookie": "private-cookie"})
+    error = httpx.HTTPStatusError("private-error-text private-cursor", request=request,
+                                  response=httpx.Response(500, request=request, json={"body": "private-mail-body"}))
+    reader = SimpleNamespace(backend="rest", requests=0, response_bytes=0)
+    monkeypatch.setattr(local_cmd, "_get_client", lambda *_: object())
+    monkeypatch.setattr(local_cmd, "RestReader", lambda *args, **kwargs: reader)
+
+    def failed(_reader):
+        raise error
+
+    monkeypatch.setattr(local_cmd, "discover_folders", failed)
+    result = runner.invoke(cli, ["local", "sync", "--no-input", "--json"])
+    assert result.exit_code == 8
+    payload = json.loads(result.stdout)
+    assert payload["error"]["code"] == "retryable_error"
+    assert "Folder discovery failed (HTTP 500)" in payload["error"]["message"]
+    for secret in ("private-cursor", "private-token", "private-cookie", "private-mail-body", "private-error-text"):
+        assert secret not in result.stdout + result.stderr
+    with closing(MailStore(path, readonly=True)) as store:
+        assert store.status()["whole_mailbox_complete"] is True
+        assert store.read("message-a")["is_read"] is False
+
+
+def test_pipe_auto_json_and_raw_error_export_keep_contract_without_mail_side_effects(runner, mailbox_store, monkeypatch, tmp_path):
+    monkeypatch.setattr(common, "_is_piped", lambda: True)
+    payload = parsed(runner.invoke(cli, ["local", "search", "toplanti"]))
+    assert payload["meta"]["returned_count"] == 2
+    output = tmp_path / "error.json"
+    result = runner.invoke(cli, ["local", "read", "missing", "--data-only", "-o", str(output)])
+    assert result.exit_code == 5
+    error = json.loads(result.stdout)
+    assert error["ok"] is False
+    assert error["error"]["code"] == "not_found"
+    assert json.loads(output.read_text()) == error
+    with closing(MailStore(mailbox_store[0], readonly=True)) as store:
+        assert store.read("message-a")["is_read"] is False
+
+
+def test_explicit_purge_removes_both_mail_stores_and_all_sidecars(runner, mailbox_store):
+    path, legacy = mailbox_store
+    targets = [Path(str(base) + suffix) for base in (path, legacy) for suffix in ("", "-wal", "-shm")]
+    for target in targets:
+        if not target.exists():
+            target.write_bytes(b"fixture local sidecar")
+    payload = parsed(runner.invoke(cli, ["local", "purge", "--include-legacy-index", "--yes", "--no-input", "--json"]))
+    assert payload["data"]["legacy_index_retained"] is False
+    assert set(payload["data"]["removed"]) == {str(target) for target in targets}
+    assert all(not target.exists() for target in targets)
+
+
+def test_explicit_legacy_purge_dry_run_preserves_both_stores(runner, mailbox_store):
+    path, legacy = mailbox_store
+    before = path.read_bytes(), legacy.read_bytes()
+    payload = parsed(runner.invoke(cli, ["local", "purge", "--include-legacy-index", "--dry-run", "--no-input", "--json"]))
+    assert payload["data"]["dry_run"] is True
+    assert payload["data"]["request"]["legacy_index_retained"] is False
+    assert (path.read_bytes(), legacy.read_bytes()) == before
+
+
+def test_explicit_legacy_purge_requires_confirmation_in_no_input_mode(runner, mailbox_store):
+    path, legacy = mailbox_store
+    before = path.read_bytes(), legacy.read_bytes()
+    result = runner.invoke(cli, ["local", "purge", "--include-legacy-index", "--no-input", "--json"])
+    assert result.exit_code == 2
+    assert json.loads(result.stdout)["error"]["code"] == "invalid_usage"
+    assert (path.read_bytes(), legacy.read_bytes()) == before
+
+
+@pytest.mark.parametrize("unsafe_scope", ["new", "legacy"])
+def test_purge_checks_every_target_before_deleting_any_symlink(runner, mailbox_store, tmp_path, unsafe_scope):
+    path, legacy = mailbox_store
+    outside = tmp_path / "unrelated-file"
+    outside.write_bytes(b"unrelated fixture data")
+    unsafe = Path(str(legacy if unsafe_scope == "legacy" else path) + "-wal")
+    unsafe.symlink_to(outside)
+    before = path.read_bytes(), legacy.read_bytes()
+    options = ["--include-legacy-index"] if unsafe_scope == "legacy" else []
+    result = runner.invoke(cli, ["local", "purge", *options, "--yes", "--no-input", "--json"])
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["ok"] is False
+    assert (path.read_bytes(), legacy.read_bytes()) == before
+    assert unsafe.is_symlink()
+    assert outside.read_bytes() == b"unrelated fixture data"
+
+
+def test_purge_rejects_nonregular_target_before_deleting_regular_stores(runner, mailbox_store):
+    path, legacy = mailbox_store
+    Path(str(legacy) + "-shm").mkdir()
+    before = path.read_bytes(), legacy.read_bytes()
+    result = runner.invoke(cli, ["local", "purge", "--include-legacy-index", "--yes", "--no-input", "--json"])
+    assert result.exit_code != 0
+    assert json.loads(result.stdout)["ok"] is False
+    assert (path.read_bytes(), legacy.read_bytes()) == before
