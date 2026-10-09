@@ -19,12 +19,14 @@ from .constants import BASE_URL, KEYRING_SERVICE_NAME, OWA_URL, USER_AGENT
 from .exceptions import AccountError, AuthRequiredError, TokenExpiredError
 from .locking import atomic_write_json, file_lock
 
+
 def _diagnostic(*args, **kwargs):
     print(*args, file=sys.stderr, **kwargs)
 
 
 TOKEN_STORAGE_BACKEND = "keyring"
 TOKEN_STORAGE_VERSION = 1
+HEADLESS_CAPTURE_TIMEOUT = 30
 
 
 def get_token(account_name: str | None = None, *, allow_interactive: bool = True) -> str:
@@ -61,6 +63,7 @@ def login(
     allow_create: bool = False,
     token: str | None = None,
     allow_interactive: bool = True,
+    headless: bool | None = None,
 ) -> str:
     """Authenticate and cache a bearer token.
 
@@ -70,6 +73,7 @@ def login(
         account_name: Account profile name
         allow_create: Allow creating new account profile
         token: Pre-fetched bearer token (skips browser if provided)
+        headless: Explicit browser mode, or profile configuration for refresh.
 
     Returns:
         Valid bearer token
@@ -104,9 +108,14 @@ def login(
         paths.config_dir.mkdir(parents=True, exist_ok=True)
 
     browser_config = account_service.load_account_config(selected).get("browser", {})
+    use_headless = bool(browser_config.get("headless", False)) if headless is None else headless
     timeout = float(browser_config.get("timeout", 120))
     if not 0 < timeout <= 600:
         raise AccountError("browser.timeout must be between 0 and 600 seconds.")
+    if use_headless:
+        if force or not paths.browser_state_file.exists():
+            raise AuthRequiredError("Headless refresh requires a saved Outlook session. Run: outlook login")
+        timeout = min(timeout, HEADLESS_CAPTURE_TIMEOUT)
 
     captured_token: list[str] = []
     seen_urls: list[str] = []
@@ -128,24 +137,29 @@ def login(
         if paths.browser_state_file.exists() and not force:
             launch_args["storage_state"] = str(paths.browser_state_file)
 
-        browser = p.chromium.launch(headless=bool(browser_config.get("headless", False)), timeout=timeout * 1000)
+        browser = p.chromium.launch(headless=use_headless, timeout=timeout * 1000)
         try:
             context = browser.new_context(user_agent=USER_AGENT, **launch_args)
             context.on("request", _intercept_request)
 
             page = context.new_page()
-            _diagnostic("Opening Outlook... Log in and wait for your inbox to load.")
-            _diagnostic("The browser will close automatically once the token is captured.")
+            if use_headless:
+                _diagnostic("Refreshing the saved Outlook session...")
+            else:
+                _diagnostic("Opening Outlook... Log in and wait for your inbox to load.")
+                _diagnostic("The browser will close automatically once the token is captured.")
             page.goto(OWA_URL, wait_until="domcontentloaded", timeout=timeout * 1000)
 
-            deadline = time.monotonic() + timeout
+            started = time.monotonic()
+            deadline = started + timeout
+            nudge_at = started + (0 if use_headless else min(25, timeout))
             while not captured_token and time.monotonic() < deadline:
                 try:
                     page.wait_for_timeout(2000)
                 except Exception:
                     break
 
-                if not captured_token and time.monotonic() > deadline - max(timeout - 25, 0):
+                if not captured_token and time.monotonic() >= nudge_at:
                     try:
                         page.evaluate(
                             """
@@ -171,6 +185,8 @@ def login(
         _diagnostic(f"\n  [debug] Total requests with Bearer: {len(seen_urls)}")
 
     if not captured_token:
+        if use_headless:
+            raise AuthRequiredError("Could not refresh the saved Outlook session headlessly. Run: outlook login")
         raise AuthRequiredError(
             "Could not capture bearer token.\n"
             "Make sure you logged in and your inbox fully loaded.\n"

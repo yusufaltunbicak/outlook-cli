@@ -214,6 +214,7 @@ def do_login(
     account_name: str | None = None,
     allow_create: bool = False,
     token: str | None = None,
+    headless: bool | None = None,
 ) -> str:
     selected = get_account_name(account_name, allow_missing=allow_create)
     return auth_login(
@@ -222,6 +223,7 @@ def do_login(
         account_name=selected,
         allow_create=allow_create,
         token=token,
+        headless=headless,
         allow_interactive=not is_no_input_mode(),
     )
 

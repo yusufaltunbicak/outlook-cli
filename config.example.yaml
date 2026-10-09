@@ -14,9 +14,10 @@ default_signature: null
 # See: https://learn.microsoft.com/en-us/windows-hardware/manufacture/desktop/default-time-zones
 timezone: UTC
 
-# Browser settings for login
+# Browser settings for automatic token refresh.
+# Explicit login/account add always use a visible browser; --no-input never opens one.
 browser:
-  headless: false
+  headless: false  # opt in to saved-session refresh without a browser window
   timeout: 120  # seconds to wait for login
 
 # Output format (table or json)

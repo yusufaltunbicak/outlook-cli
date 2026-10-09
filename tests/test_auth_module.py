@@ -142,7 +142,12 @@ class _FakeBrowser:
 class _FakePlaywrightCM:
     def __init__(self, token: str | None, raise_on_wait: bool):
         self.browser = _FakeBrowser(token, raise_on_wait)
-        self.chromium = types.SimpleNamespace(launch=lambda **_kwargs: self.browser)
+        self.launch_kwargs = None
+        self.chromium = types.SimpleNamespace(launch=self.launch)
+
+    def launch(self, **kwargs):
+        self.launch_kwargs = kwargs
+        return self.browser
 
     def __enter__(self):
         return types.SimpleNamespace(chromium=self.chromium)
@@ -341,3 +346,40 @@ def test_login_raises_when_token_cannot_be_captured(monkeypatch, tmp_path):
 
     with pytest.raises(AuthRequiredError):
         auth.login()
+
+
+def test_headless_refresh_without_saved_state_fails_before_browser(monkeypatch, tmp_path):
+    _patch_account(monkeypatch, tmp_path)
+    with pytest.raises(AuthRequiredError, match="saved Outlook session"):
+        auth.login(headless=True)
+
+
+def test_headless_refresh_caps_capture_timeout(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    paths.browser_state_file.write_text("{}")
+    monkeypatch.setattr(auth.account_service, "load_account_config", lambda _: {"browser": {"headless": True, "timeout": 120}})
+    token = "x" * 101
+    cm = _install_fake_playwright(monkeypatch, token=token)
+    monkeypatch.setattr(auth, "_pick_best_token", lambda *args, **kwargs: token)
+    monkeypatch.setattr(auth, "_get_me_for_token", lambda _: {"Id": "fake-mailbox"})
+    monkeypatch.setattr(auth, "_save_token", lambda *args, **kwargs: None)
+
+    assert auth.login() == token
+    assert cm.launch_kwargs == {"headless": True, "timeout": 30_000}
+    assert cm.browser.context_kwargs["storage_state"] == str(paths.browser_state_file)
+
+
+def test_explicit_headed_login_overrides_profile_setting(monkeypatch, tmp_path):
+    _patch_account(monkeypatch, tmp_path)
+    monkeypatch.setattr(auth.account_service, "load_account_config", lambda _: {"browser": {"headless": True}})
+    cm = _install_fake_playwright(monkeypatch, token=None, raise_on_wait=True)
+    with pytest.raises(AuthRequiredError, match="Could not capture"):
+        auth.login(headless=False)
+    assert cm.launch_kwargs["headless"] is False
+
+
+def test_no_input_still_forbids_headless_browser(monkeypatch, tmp_path):
+    paths = _patch_account(monkeypatch, tmp_path)
+    paths.browser_state_file.write_text("{}")
+    with pytest.raises(AuthRequiredError, match="disabled in --no-input"):
+        auth.login(headless=True, allow_interactive=False)

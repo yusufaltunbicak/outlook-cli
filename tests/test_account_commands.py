@@ -17,7 +17,7 @@ def test_account_add_runs_login_without_switching_current(runner, tty_mode, monk
     result = runner.invoke(account_cmd.account, ["add", "work"])
 
     assert result.exit_code == 0
-    assert calls == [{"account_name": "work", "allow_create": True}]
+    assert calls == [{"account_name": "work", "allow_create": True, "headless": False}]
     assert messages == ["Account profile 'work' added."]
 
 
