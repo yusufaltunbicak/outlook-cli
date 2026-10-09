@@ -1,43 +1,30 @@
-"""Summary command: unread inbox + today's calendar dashboard."""
-
+"""Dashboard with explicit failed sections and bounded-display versus total counts."""
 from __future__ import annotations
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
 import click
 
 from ._common import _get_client, _handle_api_error, _wants_json, account_option, print_summary_dashboard, to_json_envelope
+from ..exceptions import error_code_for_exception
 
 
 def _today_window() -> tuple[str, str]:
-    now_local = datetime.now().astimezone()
-    start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    end_local = start_local + timedelta(days=1)
-    return start_local.astimezone(timezone.utc).isoformat(), end_local.astimezone(timezone.utc).isoformat()
+    start = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    return start.astimezone(timezone.utc).isoformat(), (start + timedelta(days=1)).astimezone(timezone.utc).isoformat()
 
 
 def _fetch_unread(client):
-    try:
-        return client.get_messages(folder="Inbox", top=5, unread_only=True)
-    except Exception:
-        return []
+    return client.get_messages(folder="Inbox", top=5, unread_only=True)
 
 
 def _fetch_today_events(client):
-    try:
-        start, end = _today_window()
-        return client.get_calendar_view(start=start, end=end, top=5)
-    except Exception:
-        return []
+    start, end = _today_window()
+    return client.get_calendar_view(start=start, end=end, top=5)
 
 
 def _fetch_inbox_folder(client):
-    try:
-        return client.get_folder("Inbox")
-    except Exception:
-        return None
+    return client.get_folder("Inbox")
 
 
 @click.command()
@@ -45,36 +32,34 @@ def _fetch_inbox_folder(client):
 @account_option
 @_handle_api_error
 def summary(as_json: bool, account_name: str | None):
-    """Quick dashboard: unread inbox + today's calendar."""
+    """Show unread inbox and today's events, with partial failures reported."""
     client = _get_client(account_name)
-
-    results = {}
+    results, errors = {}, {}
     with ThreadPoolExecutor(max_workers=3) as pool:
-        futures = {
-            pool.submit(_fetch_unread, client): "unread",
-            pool.submit(_fetch_today_events, client): "events",
-            pool.submit(_fetch_inbox_folder, client): "inbox",
-        }
+        futures = {pool.submit(fn, client): section for fn, section in ((_fetch_unread, "unread"), (_fetch_today_events, "events"), (_fetch_inbox_folder, "inbox"))}
         for future in as_completed(futures):
-            results[futures[future]] = future.result()
-
-    unread_messages = results.get("unread", [])
-    today_events = results.get("events", [])
-    inbox_folder = results.get("inbox")
-
+            section = futures[future]
+            try:
+                results[section] = future.result()
+            except Exception as exc:
+                errors[section] = {"code": error_code_for_exception(exc), "message": str(exc)}
+    unread = results.get("unread")
+    events = results.get("events")
+    inbox = results.get("inbox")
+    event_meta = getattr(events, "meta", {})
+    # Without exhausted pagination or a server count the total is unknown.
+    total_events = len(events) if events is not None and event_meta.get("complete") is True else None
+    payload = {
+        "inbox": {"unread_count": inbox.unread_count if inbox is not None else None, "total_count": inbox.total_count if inbox is not None else None, "displayed_count": len(unread) if unread is not None else None, "messages": unread},
+        "calendar": {"today_count": total_events, "total_count": total_events, "displayed_count": len(events) if events is not None else None, "events": events, "meta": event_meta},
+        "errors": errors,
+    }
     if _wants_json(as_json):
-        payload = {
-            "inbox": {
-                "unread_count": inbox_folder.unread_count if inbox_folder else len(unread_messages),
-                "total_count": inbox_folder.total_count if inbox_folder else None,
-                "messages": [asdict(message) for message in unread_messages],
-            },
-            "calendar": {
-                "today_count": len(today_events),
-                "events": [asdict(event) for event in today_events],
-            },
-        }
-        click.echo(to_json_envelope(payload))
-        return
-
-    print_summary_dashboard(unread_messages, today_events, inbox_folder=inbox_folder)
+        click.echo(to_json_envelope(payload, ok=not errors, meta={"partial": bool(errors and results), "failed_sections": sorted(errors)}, error={"code": "partial_failure" if results else "fetch_failed", "message": "One or more dashboard sections could not be loaded"} if errors else None))
+    else:
+        if results:
+            print_summary_dashboard(unread or [], events or [], inbox_folder=inbox)
+        for section, error in errors.items():
+            click.echo(f"{section}: unavailable ({error['message']})", err=True)
+    if errors:
+        raise click.exceptions.Exit(1)

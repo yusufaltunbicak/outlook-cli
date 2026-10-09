@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import click
 
+from ..serialization import pagination_options
+
 from ._common import (
     _get_client,
     _handle_api_error,
@@ -25,7 +27,7 @@ from ._common import (
 def contacts(max_count: int, as_json: bool, output: str | None, account_name: str | None):
     """List contacts."""
     client = _get_client()
-    contact_list = client.get_contacts(top=max_count)
+    contact_list = client.get_contacts(top=max_count, **pagination_options())
 
     if _wants_json(as_json):
         if output:

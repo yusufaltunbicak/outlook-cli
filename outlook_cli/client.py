@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import json
-import time
+import threading
+import uuid
 from pathlib import Path
 
 import httpx
@@ -10,8 +11,11 @@ from urllib.parse import quote
 
 from . import account as account_service
 from .constants import ATTACHMENT_SIZE_THRESHOLD, BASE_URL, DEFERRED_SEND_PROPERTY_ID, OWA_SERVICE_URL, USER_AGENT
-from .exceptions import RateLimitError, ResourceNotFoundError, TokenExpiredError
+from .exceptions import AccountError, OutlookCliError, ResourceNotFoundError, TokenExpiredError
 from .models import Attachment, Contact, Email, Event, Folder
+from .pagination import Page, paginate
+from .state import IDStore, atomic_json_write, locked_file
+from .transport import request_json, request_response
 
 import html as _html_mod
 
@@ -77,19 +81,27 @@ def _build_query_params(
     if filter_before:
         filter_parts.append(f"ReceivedDateTime lt {filter_before}T23:59:59Z")
     if filter_category:
-        filter_parts.append(f"Categories/any(c:c eq '{filter_category}')")
+        escaped_category = filter_category.replace("'", "''")
+        filter_parts.append(f"Categories/any(c:c eq '{escaped_category}')")
     return " and ".join(filter_parts), "", False
 
 
 class OutlookClient:
     """HTTP client for Outlook REST API v2."""
 
-    MAX_ID_MAP_SIZE = 500
+    MAX_ID_MAP_SIZE = None  # Compatibility only: display references never expire.
 
-    def __init__(self, token: str, account_name: str | None = None):
+    def __init__(self, token: str, account_name: str | None = None, refresh=None):
         self.account_name = account_service.resolve_account_name(account_name)
         self._paths = account_service.get_account_paths(self.account_name)
         self._token = token
+        self._refresh = refresh
+        self._folder_cache = {}
+        self._folder_lock = threading.RLock()
+        self._pool_lock = threading.Lock()
+        self._owa_client = None
+        self._upload_client = None
+        self._id_store = None
         self._client = httpx.Client(
             base_url=BASE_URL,
             headers={
@@ -99,96 +111,40 @@ class OutlookClient:
             },
             timeout=30,
         )
-        self._id_map: dict[str, str] = self._load_id_map()
-        self._next_num: int = max((int(k) for k in self._id_map if k.isdigit()), default=0) + 1
+        # Resolve durable references on demand: startup must not load an ever-growing map.
+        self._id_map: dict[str, str] = {}
 
     # ------------------------------------------------------------------
     # Mail
     # ------------------------------------------------------------------
 
     def get_messages(
-        self,
-        folder: str = "Inbox",
-        top: int = 25,
-        skip: int = 0,
-        unread_only: bool = False,
-        filter_from: str | None = None,
-        filter_subject: str | None = None,
-        filter_after: str | None = None,
-        filter_before: str | None = None,
-        filter_has_attachments: bool = False,
-        filter_category: str | None = None,
-        filter_no_category: bool = False,
-        select: str | None = None,
-    ) -> list[Email]:
+        self, folder: str = "Inbox", top: int = 25, skip: int = 0,
+        unread_only: bool = False, filter_from: str | None = None,
+        filter_subject: str | None = None, filter_after: str | None = None,
+        filter_before: str | None = None, filter_has_attachments: bool = False,
+        filter_category: str | None = None, filter_no_category: bool = False,
+        select: str | None = None, all_pages: bool = False,
+    ) -> Page:
         folder_id = self._resolve_folder(folder)
-        folder_path = f"/MailFolders/{folder_id}/messages"
         filter_str, search_str, needs_search = _build_query_params(
-            unread_only=unread_only,
-            filter_from=filter_from,
-            filter_subject=filter_subject,
-            filter_after=filter_after,
-            filter_before=filter_before,
-            filter_has_attachments=filter_has_attachments,
-            filter_category=filter_category,
+            unread_only, filter_from, filter_subject, filter_after,
+            filter_before, filter_has_attachments, filter_category,
         )
-
-        if not filter_no_category:
-            # Standard fetch — server-side filtering is sufficient
-            if needs_search:
-                params: dict = {"$top": top, "$search": search_str}
-                if select:
-                    params["$select"] = select
-                resp = self._get(folder_path, params=params)
-            else:
-                params = {
-                    "$top": top,
-                    "$skip": skip,
-                    "$orderby": "ReceivedDateTime desc",
-                }
-                if filter_str:
-                    params["$filter"] = filter_str
-                if select:
-                    params["$select"] = select
-                resp = self._get(folder_path, params=params)
-            messages = [Email.from_api(m) for m in resp.get("value", [])]
+        params = {"$top": min(top * 3 if filter_no_category else top, 1000)}
+        if needs_search:
+            params["$search"] = search_str
         else:
-            # Client-side filtering: over-fetch in pages until we have enough
-            messages: list[Email] = []
-            batch_size = top * 3  # fetch 3x to compensate for filtering
-            current_skip = skip
-            max_pages = 5  # safety limit
-            for _ in range(max_pages):
-                if needs_search:
-                    params = {"$top": batch_size, "$search": search_str}
-                    if select:
-                        params["$select"] = select
-                    resp = self._get(folder_path, params=params)
-                else:
-                    params = {
-                        "$top": batch_size,
-                        "$skip": current_skip,
-                        "$orderby": "ReceivedDateTime desc",
-                    }
-                    if filter_str:
-                        params["$filter"] = filter_str
-                    if select:
-                        params["$select"] = select
-                    resp = self._get(folder_path, params=params)
-                batch = resp.get("value", [])
-                if not batch:
-                    break
-                for m in batch:
-                    email = Email.from_api(m)
-                    if not email.categories:
-                        messages.append(email)
-                        if len(messages) >= top:
-                            break
-                if len(messages) >= top or len(batch) < batch_size:
-                    break
-                current_skip += batch_size
-            messages = messages[:top]
-
+            params.update({"$skip": skip, "$orderby": "ReceivedDateTime desc"})
+            if filter_str:
+                params["$filter"] = filter_str
+        if select:
+            fields = list(dict.fromkeys(["Id", *select.split(","), *(["Categories"] if filter_no_category else [])]))
+            params["$select"] = ",".join(fields)
+        raw = paginate(self._get, f"/MailFolders/{folder_id}/messages", params,
+                       limit=None if all_pages else top, search=needs_search,
+                       predicate=(lambda item: not item.get("Categories")) if filter_no_category else None)
+        messages = Page((Email.from_api(item) for item in raw), meta=raw.meta)
         self._assign_display_nums(messages)
         return messages
 
@@ -199,45 +155,34 @@ class OutlookClient:
         email.display_num = int(message_id) if message_id.isdigit() else 0
         return email
 
-    def get_thread(self, message_id: str, max_messages: int = 50) -> list[Email]:
-        """Fetch all messages in the same conversation as the given message.
-
-        REST v2 doesn't support $filter on ConversationId, so we search by
-        the base subject (strip Re:/Fwd: prefixes) and then filter client-side
-        by matching ConversationId. Results are sorted oldest-first.
-        """
+    def get_thread(self, message_id: str, max_messages: int = 50) -> Page:
+        """Search the conversation, keeping its seed and reporting search coverage."""
         import re
-
         email = self.get_message(message_id)
-        conv_id = email.conversation_id
-        if not conv_id:
-            return [email]
-
-        # Strip reply/forward prefixes to get the base subject for search
         base_subject = re.sub(
-            r'^(Re|Fwd|İlt|Ynt|Fw|AW|SV|VS)\s*:\s*',
-            '', email.subject, flags=re.IGNORECASE,
+            r"^(?:(?:Re|Fwd|İlt|Ynt|Fw|AW|SV|VS)\s*:\s*)+", "",
+            email.subject, flags=re.IGNORECASE,
         ).strip()
-
-        if not base_subject:
-            return [email]
-
-        # Search by subject, then filter by ConversationId client-side
-        resp = self._get(
-            "/messages",
-            params={
-                "$search": f'"subject:{base_subject}"',
-                "$top": max_messages,
-            },
-        )
-        all_msgs = [Email.from_api(m) for m in resp.get("value", [])]
-        thread = [m for m in all_msgs if m.conversation_id == conv_id]
-
-        # Sort chronologically (oldest first)
-        thread.sort(key=lambda m: m.received)
-
+        if not email.conversation_id or not base_subject:
+            return Page([email], meta={"complete": False, "has_more": None,
+                        "truncated_reason": "conversation_identity_unavailable", "pages": 0, "returned_count": 1})
+        raw = paginate(self._get, "/messages",
+                       {"$search": f'"subject:{base_subject}"', "$top": min(max_messages, 1000)},
+                       limit=max_messages, search=True,
+                       predicate=lambda m: m.get("ConversationId") == email.conversation_id)
+        by_id = {item["Id"]: Email.from_api(item) for item in raw}
+        by_id[email.id] = email
+        items = list(by_id.values())
+        if len(items) > max_messages:
+            items = [m for m in items if m.id != email.id][:max(0, max_messages - 1)] + [email]
+            raw.meta.update(complete=False, has_more=True, truncated_reason="limit")
+        from datetime import timezone
+        items.sort(key=lambda m: m.received.replace(tzinfo=timezone.utc) if m.received.tzinfo is None else m.received)
+        thread = Page(items, meta=raw.meta)
+        thread.meta["returned_count"] = len(thread)
+        thread.meta["scope"] = "subject_search_filtered_by_conversation"
         self._assign_display_nums(thread)
-        return thread if thread else [email]
+        return thread
 
     def send_mail(
         self,
@@ -350,7 +295,12 @@ class OutlookClient:
             f"/messages/{real_id}/move",
             json={"DestinationId": folder_id},
         )
-        return Email.from_api(resp)
+        email = Email.from_api(resp)
+        if email.id:
+            email.display_num = self._store().replace(real_id, email.id)
+            self._id_map = {number: email.id if value == real_id else value for number, value in self._id_map.items()}
+            self._id_map[str(email.display_num)] = email.id
+        return email
 
     def copy_message(self, message_id: str, destination_folder: str) -> Email:
         real_id = self._resolve_id(message_id)
@@ -372,11 +322,13 @@ class OutlookClient:
         }
         if name_or_id.lower() in well_known:
             return name_or_id
-        # Search by display name
-        folders = self.get_folders()
-        for f in folders:
-            if f.name.lower() == name_or_id.lower():
-                return f.id
+        # One folder listing per client, shared safely by concurrent bulk actions.
+        with self._folder_lock:
+            if not self._folder_cache:
+                for folder in self.get_folders():
+                    self._folder_cache[folder.name.casefold()] = folder.id
+            if name_or_id.casefold() in self._folder_cache:
+                return self._folder_cache[name_or_id.casefold()]
         raise ResourceNotFoundError(f"Folder '{name_or_id}' not found. Run 'outlook folders' to see available folders.")
 
     def delete_message(self, message_id: str) -> None:
@@ -468,157 +420,120 @@ class OutlookClient:
     # Scheduled send
     # ------------------------------------------------------------------
 
-    def schedule_send(
-        self,
-        to: list[str],
-        subject: str,
-        body: str,
-        send_at: str,
-        cc: list[str] | None = None,
-        html: bool = False,
-    ) -> dict:
-        """Schedule an email via /sendmail with deferred send time.
-
-        send_at must be ISO 8601 format (e.g. 2024-03-15T10:00:00Z).
-        Returns the tracked schedule entry.
-        """
-        self.send_mail(to=to, subject=subject, body=body, cc=cc, html=html, send_at=send_at)
-        entry = self._track_scheduled(
-            to=to, cc=cc, subject=subject, send_at=send_at,
-        )
-        return entry
+    def schedule_send(self, to: list[str], subject: str, body: str, send_at: str,
+                      cc: list[str] | None = None, html: bool = False) -> dict:
+        # Creating a draft first gives cancellation an exact identity.
+        draft = self.create_draft(to=to, subject=subject, body=body, cc=cc, html=html)
+        return self.schedule_draft(draft.id, send_at)
 
     def schedule_draft(self, message_id: str, send_at: str) -> dict:
-        """Set deferred send time on an existing draft and send it."""
         real_id = self._resolve_id(message_id)
-        # Read draft details for tracking
-        msg = self._get(f"/messages/{real_id}", params={"$select": "Subject,ToRecipients,CcRecipients"})
+        msg = self._get(f"/messages/{real_id}", params={"$select": "Id,InternetMessageId,Subject,ToRecipients,CcRecipients"})
         to = [r["EmailAddress"]["Address"] for r in msg.get("ToRecipients", [])]
         cc = [r["EmailAddress"]["Address"] for r in msg.get("CcRecipients", [])]
-        subject = msg.get("Subject", "")
-
         resp = self._patch(f"/messages/{real_id}", json={
-            "SingleValueExtendedProperties": [{
-                "PropertyId": DEFERRED_SEND_PROPERTY_ID,
-                "Value": send_at,
-            }],
+            "SingleValueExtendedProperties": [{"PropertyId": DEFERRED_SEND_PROPERTY_ID, "Value": send_at}],
         })
         updated_id = resp.get("Id", real_id)
-        self._post(f"/messages/{updated_id}/send")
-
-        entry = self._track_scheduled(
-            to=to, cc=cc or None, subject=subject, send_at=send_at,
-            message_id=updated_id,
-        )
+        # Persist before sending so a network failure never loses a potentially queued item.
+        entry = self._track_scheduled(to=to, cc=cc or None, subject=msg.get("Subject", ""),
+                                      send_at=send_at, message_id=updated_id,
+                                      internet_message_id=resp.get("InternetMessageId") or msg.get("InternetMessageId"),
+                                      status="send_pending")
+        try:
+            self._post(f"/messages/{updated_id}/send")
+        except Exception:
+            self._update_scheduled(entry["tracking_id"], status="send_unconfirmed")
+            raise
+        self._update_scheduled(entry["tracking_id"], status="scheduled")
+        entry["status"] = "scheduled"
         return entry
 
     def get_scheduled_list(self) -> list[dict]:
-        """Get scheduled messages from local tracking + Drafts cross-check.
-
-        REST v2 doesn't support $filter/$expand on extended properties,
-        so we cross-reference local tracking with Drafts folder by subject
-        to enrich entries with message_id for server-side cancellation.
-        """
         entries = self._load_scheduled()
-        if not entries:
-            return entries
-
-        # Cross-check with Drafts to find matching message IDs
-        try:
-            resp = self._get("/MailFolders/Drafts/messages", params={
-                "$top": 50,
-                "$select": "Id,Subject",
-            })
-            drafts_by_subject: dict[str, str] = {}
-            for m in resp.get("value", []):
-                drafts_by_subject[m.get("Subject", "")] = m["Id"]
-
-            for entry in entries:
-                if not entry.get("message_id"):
-                    draft_id = drafts_by_subject.get(entry.get("subject", ""))
-                    if draft_id:
-                        entry["message_id"] = draft_id
-        except Exception:
-            pass  # server unavailable, show local-only
-
+        for entry in entries:
+            entry["cancellable"] = bool(entry.get("message_id"))
+            if not entry.get("message_id"):
+                # Historical subject-only tracking cannot identify the right draft safely.
+                entry["status"] = "identity_unavailable"
         return entries
 
-    def cancel_scheduled_entry(self, index: int) -> dict | None:
-        """Cancel a scheduled entry by its 1-based index.
-
-        If a matching draft is found on server, deletes it.
-        Always removes from local tracking.
-        """
-        # Use enriched list (with message_id from Drafts cross-check)
-        enriched = self.get_scheduled_list()
-        if index < 1 or index > len(enriched):
-            return None
-
-        removed = enriched[index - 1]
-
-        # Remove from local tracking
-        local = self._load_scheduled()
-        if index - 1 < len(local):
-            local.pop(index - 1)
-            self._save_scheduled(local)
-
-        # Try to delete the draft from server
-        msg_id = removed.get("message_id")
-        if msg_id:
+    def cancel_scheduled_entry(self, index: int, expected_tracking_id: str | None = None) -> dict | None:
+        # Keep the lock across delete+commit so another process cannot change the index.
+        with locked_file(self._paths.scheduled_file):
+            entries = self._load_scheduled()
+            if index < 1 or index > len(entries):
+                return None
+            entry = entries[index - 1]
+            if expected_tracking_id and entry.get("tracking_id") != expected_tracking_id:
+                raise OutlookCliError("Schedule list changed during confirmation. Run schedule-list again; nothing was cancelled.")
+            message_id = entry.get("message_id")
+            if not message_id:
+                raise OutlookCliError("Cannot safely cancel this legacy schedule: no message identity was recorded. Tracking preserved.")
             try:
-                self._delete(f"/messages/{msg_id}")
-                removed["server_deleted"] = True
-            except Exception:
-                removed["server_deleted"] = False
+                # Verify it is still a draft; deleting SentItems cannot recall a message.
+                message = self._get(f"/messages/{message_id}", params={"$select": "Id,IsDraft,InternetMessageId"})
+                if message.get("IsDraft") is not True:
+                    raise OutlookCliError("Scheduled message is no longer a confirmed draft; cancellation was not performed. Tracking preserved.")
+                expected = entry.get("internet_message_id")
+                if expected and message.get("InternetMessageId") and message["InternetMessageId"] != expected:
+                    raise OutlookCliError("Scheduled message identity changed; tracking preserved.")
+                self._delete(f"/messages/{message_id}")
+            except Exception as exc:
+                entry["status"] = "cancellation_failed"
+                entry["last_error"] = type(exc).__name__
+                self._save_scheduled(entries)
+                raise
+            entries.pop(index - 1)
+            self._save_scheduled(entries)
+            return dict(entry, server_deleted=True)
 
-        return removed
-
-    # ------------------------------------------------------------------
-    # Scheduled tracking helpers
-    # ------------------------------------------------------------------
-
-    def _track_scheduled(
-        self,
-        to: list[str],
-        subject: str,
-        send_at: str,
-        cc: list[str] | None = None,
-        message_id: str | None = None,
-    ) -> dict:
-        from datetime import datetime as dt, timezone as tz
-        entry = {
-            "to": to,
-            "cc": cc or [],
-            "subject": subject,
-            "scheduled_at": send_at,
-            "created_at": dt.now(tz.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }
+    def _track_scheduled(self, to: list[str], subject: str, send_at: str,
+                         cc: list[str] | None = None, message_id: str | None = None,
+                         internet_message_id: str | None = None, status: str = "scheduled") -> dict:
+        from datetime import datetime, timezone
+        entry = {"tracking_id": str(uuid.uuid4()), "to": to, "cc": cc or [], "subject": subject,
+                 "scheduled_at": send_at, "created_at": datetime.now(timezone.utc).isoformat(), "status": status}
         if message_id:
             entry["message_id"] = message_id
-        entries = self._load_scheduled()
-        entries.append(entry)
-        self._save_scheduled(entries)
+        if internet_message_id:
+            entry["internet_message_id"] = internet_message_id
+        with locked_file(self._paths.scheduled_file):
+            entries = self._load_scheduled()
+            entries.append(entry)
+            self._save_scheduled(entries)
         return entry
 
+    def _update_scheduled(self, tracking_id: str, **updates) -> None:
+        with locked_file(self._paths.scheduled_file):
+            entries = self._load_scheduled()
+            for entry in entries:
+                if entry.get("tracking_id") == tracking_id:
+                    entry.update(updates)
+                    break
+            self._save_scheduled(entries)
+
     def _load_scheduled(self) -> list[dict]:
-        if self._paths.scheduled_file.exists():
-            try:
-                return json.loads(self._paths.scheduled_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        return []
+        if not self._paths.scheduled_file.exists():
+            return []
+        try:
+            entries = json.loads(self._paths.scheduled_file.read_text())
+            if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+                raise ValueError("invalid tracking file")
+            return entries
+        except (OSError, ValueError) as exc:
+            raise AccountError("Scheduled tracking file is unreadable; preserved for repair.") from exc
 
     def _save_scheduled(self, entries: list[dict]) -> None:
-        self._paths.scheduled_file.parent.mkdir(parents=True, exist_ok=True)
-        self._paths.scheduled_file.write_text(json.dumps(entries, indent=2))
+        atomic_json_write(self._paths.scheduled_file, entries)
 
-    def search_messages(self, query: str, top: int = 25) -> list[Email]:
-        params = {
-            "$search": f'"{query}"',
-            "$top": top,
-        }
-        resp = self._get("/messages", params=params)
-        messages = [Email.from_api(m) for m in resp.get("value", [])]
+    def search_messages(self, query: str, top: int = 25, select: str | None = None,
+                        all_pages: bool = False) -> Page:
+        params = {"$search": f'"{query}"', "$top": min(top, 1000)}
+        if select:
+            params["$select"] = ",".join(dict.fromkeys(["Id", *select.split(",")]))
+        raw = paginate(self._get, "/messages", params, limit=None if all_pages else top, search=True)
+        messages = Page((Email.from_api(item) for item in raw), meta=raw.meta)
         self._assign_display_nums(messages)
         return messages
 
@@ -643,9 +558,9 @@ class OutlookClient:
     # Folders
     # ------------------------------------------------------------------
 
-    def get_folders(self) -> list[Folder]:
-        resp = self._get("/MailFolders", params={"$top": 100})
-        return [Folder.from_api(f) for f in resp.get("value", [])]
+    def get_folders(self, all_pages: bool = True) -> Page:
+        raw = paginate(self._get, "/MailFolders", {"$top": 100}, limit=None if all_pages else 100)
+        return Page((Folder.from_api(item) for item in raw), meta=raw.meta)
 
     def get_folder(self, folder_id: str) -> Folder:
         resp = self._get(f"/MailFolders/{folder_id}")
@@ -655,10 +570,11 @@ class OutlookClient:
     # Attachments
     # ------------------------------------------------------------------
 
-    def get_attachments(self, message_id: str) -> list[Attachment]:
+    def get_attachments(self, message_id: str, include_content: bool = False) -> Page:
         real_id = self._resolve_id(message_id)
-        resp = self._get(f"/messages/{real_id}/attachments")
-        return [Attachment.from_api(a) for a in resp.get("value", [])]
+        params = {} if include_content else {"$select": "Id,Name,ContentType,Size,IsInline"}
+        raw = paginate(self._get, f"/messages/{real_id}/attachments", params, limit=None)
+        return Page((Attachment.from_api(item) for item in raw), meta=raw.meta)
 
     def download_attachment(self, message_id: str, attachment_id: str) -> Attachment:
         real_id = self._resolve_id(message_id)
@@ -711,15 +627,16 @@ class OutlookClient:
             while offset < file_size:
                 chunk = f.read(chunk_size)
                 chunk_end = offset + len(chunk) - 1
-                resp = httpx.put(
-                    upload_url,
+                resp = request_response(
+                    self._session("upload"), "PUT", upload_url,
                     content=chunk,
                     headers={
                         "Content-Type": "application/octet-stream",
                         "Content-Length": str(len(chunk)),
                         "Content-Range": f"bytes {offset}-{chunk_end}/{file_size}",
                     },
-                    timeout=120,
+                    retry_safe=False,
+                    account_name=self.account_name,
                 )
                 resp.raise_for_status()
                 if resp.content:
@@ -760,7 +677,7 @@ class OutlookClient:
     # Calendar
     # ------------------------------------------------------------------
 
-    def get_calendar_view(self, start: str, end: str, top: int = 50, calendar_name: str | None = None) -> list[Event]:
+    def get_calendar_view(self, start: str, end: str, top: int = 50, calendar_name: str | None = None, all_pages: bool = False) -> list[Event]:
         params = {
             "startDateTime": start,
             "endDateTime": end,
@@ -772,14 +689,14 @@ class OutlookClient:
             path = f"/calendars/{cal_id}/calendarview"
         else:
             path = "/calendarview"
-        resp = self._get(path, params=params)
-        events = [Event.from_api(e) for e in resp.get("value", [])]
+        raw = paginate(self._get, path, params, limit=None if all_pages else top)
+        events = Page((Event.from_api(e) for e in raw), meta=raw.meta)
         self._assign_event_display_nums(events)
         return events
 
-    def get_events(self, top: int = 25) -> list[Event]:
-        resp = self._get("/events", params={"$top": top, "$orderby": "Start/DateTime desc"})
-        events = [Event.from_api(e) for e in resp.get("value", [])]
+    def get_events(self, top: int = 25, all_pages: bool = False) -> Page:
+        raw = paginate(self._get, "/events", {"$top": top, "$orderby": "Start/DateTime desc"}, limit=None if all_pages else top)
+        events = Page((Event.from_api(e) for e in raw), meta=raw.meta)
         self._assign_event_display_nums(events)
         return events
 
@@ -835,7 +752,7 @@ class OutlookClient:
         data = self._post("/events", json=payload)
         return Event.from_api(data)
 
-    def get_event_instances(self, event_id: str, start: str, end: str, top: int = 50) -> list[Event]:
+    def get_event_instances(self, event_id: str, start: str, end: str, top: int = 50, all_pages: bool = False) -> list[Event]:
         """Get occurrences of a recurring event.
 
         If given an occurrence ID, resolves to its series master first.
@@ -844,12 +761,10 @@ class OutlookClient:
         # Check if this is an occurrence — need series master for /instances
         ev = self._get(f"/events/{real_id}", params={"$select": "Type,SeriesMasterId"})
         master_id = ev.get("SeriesMasterId") or real_id
-        resp = self._get(f"/events/{master_id}/instances", params={
-            "startDateTime": start,
-            "endDateTime": end,
-            "$top": top,
-        })
-        events = [Event.from_api(e) for e in resp.get("value", [])]
+        raw = paginate(self._get, f"/events/{master_id}/instances", {
+            "startDateTime": start, "endDateTime": end, "$top": top,
+        }, limit=None if all_pages else top)
+        events = Page((Event.from_api(e) for e in raw), meta=raw.meta)
         self._assign_event_display_nums(events)
         return events
 
@@ -947,9 +862,8 @@ class OutlookClient:
         resp = self._get("/people", params={"$search": query, "$top": top})
         return resp.get("value", [])
 
-    def get_calendars(self) -> list[dict]:
-        resp = self._get("/calendars", params={"$top": 50})
-        return resp.get("value", [])
+    def get_calendars(self, all_pages: bool = True) -> Page:
+        return paginate(self._get, "/calendars", {"$top": 50}, limit=None if all_pages else 50)
 
     def _resolve_calendar(self, name: str) -> str:
         """Resolve a calendar display name to its ID."""
@@ -966,28 +880,15 @@ class OutlookClient:
         raise ResourceNotFoundError(f"Calendar '{name}' not found. Available: {available}")
 
     def _assign_event_display_nums(self, events: list[Event]) -> None:
-        """Assign display numbers to events using the shared ID map."""
-        for ev in events:
-            existing = next(
-                (k for k, v in self._id_map.items() if v == ev.id and k.isdigit()),
-                None,
-            )
-            if existing:
-                ev.display_num = int(existing)
-            else:
-                ev.display_num = self._next_num
-                self._id_map[str(self._next_num)] = ev.id
-                self._next_num += 1
-        self._evict_old_entries()
-        self._save_id_map()
+        self._assign_display_nums(events)
 
     # ------------------------------------------------------------------
     # Contacts
     # ------------------------------------------------------------------
 
-    def get_contacts(self, top: int = 50) -> list[Contact]:
-        resp = self._get("/contacts", params={"$top": top})
-        return [Contact.from_api(c) for c in resp.get("value", [])]
+    def get_contacts(self, top: int = 50, all_pages: bool = False) -> Page:
+        raw = paginate(self._get, "/contacts", {"$top": top}, limit=None if all_pages else top)
+        return Page((Contact.from_api(c) for c in raw), meta=raw.meta)
 
     # ------------------------------------------------------------------
     # Categories
@@ -1030,14 +931,15 @@ class OutlookClient:
 
     def add_category(self, message_id: str, category: str) -> list[str]:
         current = self.get_categories(message_id)
-        if category not in current:
-            current.append(category)
-        return self.set_categories(message_id, current)
+        if category in current:
+            return current
+        return self.set_categories(message_id, [*current, category])
 
     def remove_category(self, message_id: str, category: str) -> list[str]:
         current = self.get_categories(message_id)
-        current = [c for c in current if c != category]
-        return self.set_categories(message_id, current)
+        if category not in current:
+            return current
+        return self.set_categories(message_id, [c for c in current if c != category])
 
     # ------------------------------------------------------------------
     # User info
@@ -1050,52 +952,40 @@ class OutlookClient:
     # ID mapping
     # ------------------------------------------------------------------
 
-    def _resolve_id(self, display_id: str) -> str:
-        """Convert display number to real Outlook ID."""
-        if display_id in self._id_map:
-            return self._id_map[display_id]
-        # Maybe it's already a real ID (long base64 string)
-        if len(display_id) > 50:
-            return display_id
-        raise ResourceNotFoundError(
-            f"Unknown message #{display_id}. Run 'outlook inbox' first to populate the ID map."
-        )
+    def _store(self) -> IDStore:
+        # Double check under a lock: summary/bulk readers share the same client.
+        with self._pool_lock:
+            if self._id_store is None:
+                self._id_store = IDStore(self._paths.id_map_file)
+            return self._id_store
 
-    def _assign_display_nums(self, messages: list[Email]) -> None:
-        for msg in messages:
-            # Check if this real ID already has a display number
-            existing = next(
-                (k for k, v in self._id_map.items() if v == msg.id and k.isdigit()),
-                None,
-            )
-            if existing:
-                msg.display_num = int(existing)
-            else:
-                msg.display_num = self._next_num
-                self._id_map[str(self._next_num)] = msg.id
-                self._next_num += 1
-        self._evict_old_entries()
-        self._save_id_map()
+    def _resolve_id(self, display_id: str) -> str:
+        display_id = str(display_id).lstrip("#")
+        if display_id.isdigit():
+            real_id = self._store().resolve(display_id)
+            if real_id:
+                return real_id
+            # Compatibility for library users that supplied an in-memory mapping.
+            if display_id in self._id_map:
+                return self._id_map[display_id]
+            raise ResourceNotFoundError(f"Unknown message #{display_id}. Run 'outlook inbox' first to populate the ID map.")
+        if display_id:
+            return display_id
+        raise ResourceNotFoundError("Empty message ID")
+
+    def _assign_display_nums(self, messages) -> None:
+        if not messages:
+            return
+        numbers = self._store().allocate([item.id for item in messages])
+        for item, number in zip(messages, numbers):
+            item.display_num = number
+        self._id_map.update({str(number): item.id for item, number in zip(messages, numbers)})
 
     def _evict_old_entries(self) -> None:
-        """Keep only the most recent MAX_ID_MAP_SIZE entries."""
-        numeric = sorted(
-            ((int(k), k) for k in self._id_map if k.isdigit()),
-            key=lambda x: x[0],
-        )
-        if len(numeric) <= self.MAX_ID_MAP_SIZE:
-            return
-        to_remove = numeric[: len(numeric) - self.MAX_ID_MAP_SIZE]
-        for _, k in to_remove:
-            del self._id_map[k]
+        """Deprecated: durable display references must never be evicted."""
 
     def _load_id_map(self) -> dict[str, str]:
-        if self._paths.id_map_file.exists():
-            try:
-                return json.loads(self._paths.id_map_file.read_text())
-            except (json.JSONDecodeError, OSError):
-                pass
-        return {}
+        return self._store().snapshot()
 
     def _try_get_web_link(self, collection_path: str, real_id: str) -> str | None:
         """Fetch the Outlook Web URL for a message or event, if it exists."""
@@ -1108,8 +998,8 @@ class OutlookClient:
         return resp.get("WebLink") or None
 
     def _save_id_map(self) -> None:
-        self._paths.id_map_file.parent.mkdir(parents=True, exist_ok=True)
-        self._paths.id_map_file.write_text(json.dumps(self._id_map))
+        # Allocation persists transactionally; retained for existing integrations.
+        self._id_map = self._store().snapshot()
 
     # ------------------------------------------------------------------
     # HTTP helpers
@@ -1127,56 +1017,51 @@ class OutlookClient:
     def _delete(self, path: str) -> dict:
         return self._request("DELETE", path)
 
-    def _request(
-        self,
-        method: str,
-        path: str,
-        params: dict | None = None,
-        json: dict | None = None,
-        _retry: int = 0,
-    ) -> dict:
-        resp = self._client.request(method, path, params=params, json=json)
-
-        if resp.status_code == 401:
+    def _refresh_token(self):
+        if self._refresh is None:
             raise TokenExpiredError("Token expired. Run: outlook login")
+        token = self._refresh()
+        if token:
+            self._token = token
+            self._client.headers["Authorization"] = f"Bearer {token}"
+            if self._owa_client is not None:
+                self._owa_client.headers["Authorization"] = f"Bearer {token}"
+        return token
 
-        if resp.status_code == 429:
-            if _retry >= 3:
-                raise RateLimitError("Rate limited after 3 retries")
-            retry_after = int(resp.headers.get("Retry-After", 2 ** (_retry + 1)))
-            time.sleep(retry_after)
-            return self._request(method, path, params=params, json=json, _retry=_retry + 1)
+    def _request(self, method: str, path: str, params: dict | None = None,
+                 json: dict | None = None, _retry: int = 0) -> dict:
+        return request_json(self._client, method, path, params=params, json=json,
+                            refresh=self._refresh_token if self._refresh else None,
+                            account_name=self.account_name)
 
-        if resp.status_code == 204:
-            return {}
+    def _session(self, kind: str) -> httpx.Client:
+        with self._pool_lock:
+            attribute = "_owa_client" if kind == "owa" else "_upload_client"
+            session = getattr(self, attribute)
+            if session is None:
+                # Pre-authenticated upload URLs must never receive mailbox tokens.
+                headers = {"User-Agent": USER_AGENT}
+                if kind == "owa":
+                    headers["Authorization"] = f"Bearer {self._token}"
+                session = httpx.Client(headers=headers, timeout=15 if kind == "owa" else 120)
+                setattr(self, attribute, session)
+            return session
 
-        resp.raise_for_status()
+    def close(self) -> None:
+        for session in (self._client, self._owa_client, self._upload_client):
+            if session is not None:
+                session.close()
 
-        if not resp.content:
-            return {}
-        return resp.json()
+    def __enter__(self):
+        return self
 
+    def __exit__(self, *_args):
+        self.close()
 
     def _owa_action(self, action: str, payload: dict) -> dict:
-        """Call OWA service.svc endpoint.
-
-        OWA uses a non-standard pattern: the JSON payload is URL-encoded
-        in the x-owa-urlpostdata header, and the body is empty.
-        """
-        resp = httpx.post(
-            f"{OWA_SERVICE_URL}?action={action}",
-            headers={
-                "Authorization": f"Bearer {self._token}",
-                "User-Agent": USER_AGENT,
-                "Content-Type": "application/json; charset=utf-8",
-                "Action": action,
-                "x-req-source": "Mail",
-                "x-owa-urlpostdata": quote(json.dumps(payload), safe=""),
-            },
-            content=b"",
-            timeout=15,
-        )
-        if resp.status_code == 401:
-            raise TokenExpiredError("Token expired. Run: outlook login")
-        resp.raise_for_status()
-        return resp.json()
+        return request_json(self._session("owa"), "POST", f"{OWA_SERVICE_URL}?action={action}",
+                            headers={"Content-Type": "application/json; charset=utf-8",
+                                     "Action": action, "x-req-source": "Mail",
+                                     "x-owa-urlpostdata": quote(json.dumps(payload), safe="")},
+                            content=b"", refresh=self._refresh_token if self._refresh else None,
+                            account_name=self.account_name, retry_safe=action.startswith(("Get", "Find")))

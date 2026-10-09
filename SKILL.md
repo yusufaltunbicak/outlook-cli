@@ -1,562 +1,128 @@
 ---
 name: outlook-cli
-description: CLI skill for Outlook 365 to read, send, search, and manage emails, calendar events, categories, and contacts from the terminal without API keys or admin consent
+description: Read, search and manage Outlook mail, calendar, categories and attachments with the local outlook CLI. Supports account-scoped local search and optional Graph indexing.
 author: yusufaltunbicak
-version: "0.1.5"
-tags:
-  - outlook
-  - email
-  - office365
-  - calendar
-  - events
-  - meetings
-  - categories
-  - attachments
-  - terminal
-  - cli
+version: "0.2.0"
+tags: [outlook, email, office365, calendar, attachments, cli]
 ---
 
-# outlook-cli Skill
+# Outlook CLI for AI Agents
 
-Use this skill when the user wants to read, send, search, or manage Outlook 365 emails and calendar events from the terminal. Also supports file attachments, follow-up flags, message pinning, opening items in browser, recurring events, shared calendars, free/busy scheduling, categories, contacts, and signatures.
+Use the installed `outlook` command. Discover exact options with `outlook schema COMMAND --json` or `outlook COMMAND --help`; do not guess flags. The source checkout is the authority for this skill. See `docs/upgrade-0.2.md` for compatibility changes.
 
-## Prerequisites
-
-```bash
-# Install (requires Python 3.10+)
-cd ~/outlook-cli && pip install -e .
-playwright install chromium
-```
-
-## Authentication
-
-- First run: `outlook login` opens Chromium, user logs in, bearer token is auto-captured from OWA requests.
-- Named profiles are supported via `outlook account add|list|current|switch|remove`.
-- Tokens, browser state, ID maps, scheduled-send tracking, signatures, and per-profile config are isolated per account profile.
-- Profile-scoped cache lives under `~/.cache/outlook-cli/accounts/<profile>/`; config lives under `~/.config/outlook-cli/accounts/<profile>/`.
-- Existing single-account installs continue to work through the implicit `default` profile and legacy cache paths.
-- Auto re-login on 401 is profile-aware.
-- `OUTLOOK_TOKEN` is still supported, but if a profile is bound it must match that profile's mailbox.
-- Bearer tokens are stored in the OS keychain/keyring; `token.json` remains on disk only as non-secret metadata and is migrated automatically on first use.
+## First checks
 
 ```bash
-outlook login                              # Interactive browser login
-outlook login --force                      # Force re-login, ignore saved session
-echo $TOKEN | outlook login --with-token   # Skip browser, read token from stdin
-outlook login --with-token < token.txt     # Read token from file
-outlook whoami                             # Verify current user
-outlook account add work   # Create and bind a named profile
-outlook account list
-outlook account current
-outlook account switch work
-outlook whoami --account work
+outlook doctor --json
+outlook schema read --json
+outlook schema 'index search' --json
+outlook account list --json
+outlook whoami --account work --no-input --json
 ```
 
-### Account Selection
+`doctor` reads metadata, not the keychain, and does not verify a live token. Named account selection: command `--account NAME`, `OUTLOOK_ACCOUNT`, persisted active profile, then `default`. `schema` is account-independent.
 
-- Every non-account command accepts `--account NAME`.
-- Selection precedence is: `--account NAME` → `OUTLOOK_ACCOUNT` → persisted current account → implicit `default`.
-- `outlook whoami` shows the active profile in both human and JSON output.
-- `--no-input` disables prompts and makes mutating commands fail safely unless `-y` is also provided.
-- `--dry-run` previews mutating commands without making API calls.
-- `--enable-commands` restricts which top-level commands are allowed for an agent/session.
+## Output contract
+
+Piped stdout is automatically JSON. `--json` makes this explicit. Status/progress messages and `--profile` measurements go to stderr. Never merge stderr into JSON or discard it to conceal errors.
 
 ```bash
-outlook inbox --account work
-outlook calendar --account personal --days 3
-outlook schedule-list --account work
-outlook --enable-commands whoami,inbox whoami --account work
+set -o pipefail
+outlook inbox --max 10 --view compact --no-input --json |
+  jq -e 'if .ok then .data else error(.error.message) end'
+outlook folders --json | jq -e '.data[] | select(.name == "Inbox") | .unread_count'
+outlook search 'subject:report' --limit 20 --json -o results.json
 ```
 
-### Automation / CI Safety
+Success: `{ "ok": true, "schema_version": "1", "data": ..., "meta": ... }`. Errors have `ok:false`, `error.code`, `error.message`, and a nonzero exit code; partial failures can also contain successful items in `data`. `meta` is present where applicable. Empty lists produce `data:[]`.
+
+**Version 0.2:** `-o/--output` writes the same envelope as stdout. Use `--data-only` explicitly for legacy raw success data; errors remain structured. Check both exit status and `ok`. Prefer envelopes when completeness matters.
+
+## Efficient mail research
 
 ```bash
-outlook whoami --json --no-input
-outlook delete 3 --no-input              # Fails safely unless -y is provided
-outlook send "to@email.com" "Subject" "Body" --dry-run --json
-outlook schedule "to@email.com" "Subject" "Body" "+1h" --dry-run
+outlook inbox --unread --limit 20 --view compact --json
+outlook inbox --from alice --after 2026-09-01 --body none --json
+outlook search 'from:alice@example.com' --all --fields id,subject,sender,received --json
+outlook read REAL_ID_1 REAL_ID_2 --peek --workers 4 --body text --json
+outlook thread REAL_ID_1 REAL_ID_2 --workers 4 --json
+outlook summary --json
 ```
 
-## Command Reference
+Use real `id` values from results. `display_num` is a persistent account-local reference, **not the result row number**; listing five messages does not imply IDs 1–5. SQLite allocation is concurrent-safe, has no 500-entry eviction, and does not reuse numbers. Graph and REST provider IDs are not interchangeable.
 
-### Inbox
+`--max`, `--limit`, `-n` are aliases where a count option exists. `--view compact` and `--fields` reduce message output; list/search requests also use server-side field selection. Read-only mail commands accept `--body-format` / `--body` with `none|preview|text|html`; compose commands retain their existing BODY / `--body-file` semantics.
+
+`read` normally marks unread mail as read. Use **`--peek` for research**. `--dry-run read ...` also suppresses auto-marking. One successful `read` returns an email; multi-ID reads return ordered `{id,ok,data,error?}` items. A failed item does not erase earlier successes.
+
+Pagination metadata includes `complete`, `has_more`, `truncated_reason`, `pages`, `fetched_count`, `returned_count`. `--all` follows available pages on inbox/search/folder/calendar/contacts/event-instances, subject to safety limits. Provider search and subject-based thread lookup report `complete:false` / `search_scope_unknown` when global completeness cannot be proven. Never report the returned count as a whole-mailbox total. `summary` distinguishes `displayed_count` from total counts and uses null for unknown totals.
+
+## Local index for repeated research
 
 ```bash
-outlook inbox                                    # List inbox (shows unread/total count)
-outlook inbox --max 50                           # Limit count
-outlook inbox --unread                           # Unread only
-outlook inbox --from "alice.smith"                # Filter by sender
-outlook inbox --subject "Q4 Report"              # Filter by subject
-outlook inbox --from "acme" --subject "Project"  # Combined filters
-outlook inbox --after 2026-03-01                 # After date
-outlook inbox --before 2026-03-08               # Before date
-outlook inbox --has-attachments                  # Only with attachments
-outlook inbox --unread --after 2026-03-09        # Combine any filters
-outlook inbox --json                             # JSON output
-outlook inbox --json -o emails.json              # Save to file
+outlook index sync --account work --no-input --json
+outlook index status --account work --json
+outlook index search invoice --account work --domain example.com --limit 100 --json
+outlook index search '"project alpha"' --from alice@example.com --after 2026-09-01 --json
+outlook index search --folder Inbox --require-complete --json
 ```
 
-### Read Email
+Sync defaults to all discovered folders and children, including available sent/archive folders. `--folder NAME_OR_ID` can be repeated. REST sync re-fetches full folder metadata/preview each time; it is not delta. Local search/status use no network or auth and never auto-refresh. Inspect folder timestamps, scope, `total_matches`, `returned_count`, `result_complete`; `--require-complete` checks synced scope, not freshness or whole-mailbox coverage. Full body search requires an explicit earlier `index sync --include-body`.
+
+Graph delta indexing is optional: `graph-login --client-id APP_UUID --tenant TENANT` needs an Entra public-client app and delegated `Mail.Read`, `User.Read`, `offline_access` consent, subject to tenant policy. Then use `index sync --backend graph` and `index search --backend graph`. First sync is full, later ones use per-folder delta; `--full` rebuilds. Graph is currently read/index-only. Default mail, sending, calendar and OWA operations continue using existing authentication. Do not feed Graph index IDs into REST mutation commands.
+
+## Attachments
 
 ```bash
-outlook read 3             # Read message by display number
-outlook read 3 --raw       # Show raw HTML body
-outlook read 3 --json      # JSON output
+outlook attachments REAL_ID --json
+outlook attachments REAL_ID -d --save-to ./downloads --json -o downloads.json
+outlook draft-verify DRAFT_ID --json
 ```
 
-### Conversation Thread
+Listing fetches metadata by default. Downloads work with pipes and JSON; results include per-file `status`, `path`, `bytes_written` or `error`. Unsafe path components are removed and existing files, symlinks and duplicate filenames are not overwritten. Use another download directory after a conflict. `--include-content` explicitly requests base64 in JSON and can produce very large output. `draft-verify` reads actual recipients and attachment metadata without marking mail read.
+
+## Compose and change mail
+
+Only send or otherwise communicate when the user's task authorizes it. Creation of an unsent draft does not send mail.
 
 ```bash
-outlook thread 3           # Show full conversation for message #3
-outlook thread 3 --json    # JSON output
+outlook draft 'a@example.com;b@example.com' 'Subject' --body-file message.txt \
+  --cc 'c@example.com,d@example.com' --cc e@example.com --json
+outlook send a@example.com 'Subject' 'Body' --to b@example.com --dry-run --json
+outlook send a@example.com 'Subject' --body-file message.txt -a report.pdf -y --no-input --json
+outlook reply REAL_ID 'Thanks' --all --dry-run --json
+outlook reply-draft REAL_ID 'Will review' --json
+outlook draft-send DRAFT_ID -y --no-input --json
+outlook forward REAL_ID colleague@example.com --comment FYI --dry-run --json
+outlook categorize ID_1 ID_2 Finance --json
+outlook move ID_1 ID_2 Archive --dry-run --json
+outlook delete ID_1 ID_2 -y --no-input --json
 ```
 
-### Send / Reply / Forward
+TO/CC accept commas, semicolons and repeated `--to` / `--cc`; invalid addresses fail before API calls. `--to` adds recipients to the required positional TO. `--attach/-a` is repeatable. `--body-file -` reads stdin once. `--dry-run` previews mutations before changing remote or local state; read-only requests can still occur for read commands. `--no-input` disables prompts and browser login; confirmable actions require `-y`. `--enable-commands` limits top-level commands.
+
+## Scheduling, calendar, categories
 
 ```bash
-outlook send "to@email.com" "Subject" "Body"                     # Shows confirmation prompt
-outlook send "to@email.com" "Subject" --body-file message.txt
-printf 'Body from stdin' | outlook send "to@email.com" "Subject" --body-file -
-outlook send "to@email.com" "Subject" "Body" -y                  # Skip confirmation
-outlook send "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com
-outlook send "to@email.com" "Subject" "<h1>Hi</h1>" --html
-outlook send "to@email.com" "Subject" "Body" --signature default  # Append saved signature
-outlook send "to@email.com" "Report" "See attached" -a report.pdf         # With attachment
-outlook send "to@email.com" "Files" "Here" -a file1.pdf -a file2.xlsx     # Multiple attachments
-
-outlook reply 3 "Thanks!"                       # Shows confirmation prompt
-printf 'Thanks from stdin' | outlook reply 3 --body-file -
-outlook reply 3 "Thanks!" -y                    # Skip confirmation
-outlook reply 3 "Noted, will fix." --all         # Reply all
-outlook reply 3 "Here it is" -a requested.pdf    # Reply with attachment
-outlook reply-draft 3                            # Create reply draft (empty body, edit in Outlook)
-outlook reply-draft 3 "Will review tomorrow"     # Create reply draft with body
-outlook reply-draft 3 --body-file reply.html --html
-outlook reply-draft 3 "<p>HTML reply</p>" --html # HTML body (preserves quoted original)
-outlook reply-draft 3 "Noted" --all              # Reply-all draft
-outlook reply-draft 3 "Body" --signature default # Reply draft with signature
-outlook reply-draft 3 --json                     # JSON output
-
-outlook forward 3 "to@email.com"                # Shows confirmation prompt
-outlook forward 3 "to@email.com" -y              # Skip confirmation
-outlook forward 3 "to@email.com" --comment "FYI"
-outlook forward 3 "to@email.com" -a extra.pdf    # Forward with additional attachment
+outlook schedule a@example.com 'Subject' 'Body' '+1h' --dry-run --json
+outlook schedule-draft DRAFT_ID 'tomorrow 09:00' -y --json
+outlook schedule-list --json
+outlook schedule-cancel 1 -y --json
+outlook calendar --days 7 --all --timezone Europe/Istanbul --json
+outlook event EVENT_ID --json
+outlook event-create Meeting 'tomorrow 14:00' 'tomorrow 15:00' -a a@example.com --dry-run --json
+outlook free-busy a@example.com tomorrow -d 30 --json
+outlook categories --json
+outlook category-rename Old New --dry-run --json
+outlook signature-list --json
 ```
 
-**Body formatting:** Plain text bodies automatically convert newlines to HTML `<br>` tags, so line breaks and paragraphs are preserved in Outlook. Use `--html` only when you need to send raw HTML markup (tables, bold, links, etc.). No special flag is needed for multi-line plain text.
+Schedule cancellation verifies the stored draft identity; legacy entries without a verified ID cannot be cancelled automatically or by subject guessing. Check those in Outlook. Category propagation records bounded failures and a resume checkpoint; only repeat the identical command when its error explicitly says it is resumable.
 
-### Drafts
+## Authentication and failures
 
-```bash
-outlook draft "to@email.com" "Subject" "Body"                    # Create draft
-outlook draft "to@email.com" "Subject" --body-file draft.txt
-outlook draft "a@b.com,c@d.com" "Subject" "Body" --cc e@f.com   # Draft with CC
-outlook draft "to@email.com" "Subject" "<h1>Hi</h1>" --html     # HTML draft
-outlook draft "to@email.com" "Subject" "Body" -a doc.pdf         # Draft with attachment
-outlook draft "to@email.com" "Subject" "Body" --signature default # Draft with signature
-outlook draft "to@email.com" "Subject" "Body" --json             # JSON output
-outlook draft-send 3                                              # Send draft (shows confirmation)
-outlook draft-send 3 -y                                           # Send draft, skip confirmation
-```
+`outlook login` is interactive OWA login; `outlook login --with-token < token.txt` is explicit token input. Tokens are stored in the OS keychain, and `token.json` contains metadata. Account-scoped browser state, IDs, schedules, signatures and indexes remain local; never expose tokens or browser-state contents.
 
-### Search
+401 refresh retries only the rejected HTTP request; it never replays the entire command. Safe reads have bounded transient retries; 429 respects `Retry-After`. An `ambiguous_write` must be inspected before retrying because the server may already have applied it. `--no-input` returns an auth error when login is needed instead of opening a browser.
 
-```bash
-outlook search "keyword"
-outlook search "from:alice acme" --max 10
-outlook search "subject:Q4 Report" --json
-outlook search "keyword" --json -o results.json
-```
-
-### Folders
-
-```bash
-outlook folders                                  # List all folders with counts
-outlook folders --json -o folders.json           # Export to file
-outlook folder "Archive" --max 20                 # Messages in a folder
-outlook folder "Sent Items" --from "john" --max 10
-```
-
-### Categories
-
-```bash
-outlook categories                               # List categories with unread/total counts
-outlook categories --json                        # JSON output
-outlook categorize 3 "FYI"                       # Add category to message
-outlook categorize 1 2 3 "FYI"                   # Add category to multiple messages
-outlook uncategorize 3 "FYI"                     # Remove category from message
-outlook uncategorize 1 2 3 "FYI"                 # Remove from multiple messages
-outlook category-create "New Category"           # Create master category
-outlook category-create "Urgent" --color 0       # Create with color (0=red, 7=blue, etc.)
-outlook category-rename "FYI" "Info"             # Rename + update all messages
-outlook category-rename "FYI" "Info" --no-propagate  # Master list only
-outlook category-clear "FYI"                     # Remove label from all messages
-outlook category-clear "FYI" --folder "Inbox"    # Limit to a folder
-outlook category-clear "FYI" --max 50            # Limit to N messages
-outlook category-clear "FYI" -y                  # Skip confirmation
-outlook category-delete "Old Category"           # Delete (with confirmation)
-outlook category-delete "Old Category" -y        # Delete without confirmation
-```
-
-### Signatures
-
-```bash
-outlook signature-pull                       # Extract signature from recent sent email
-outlook signature-pull --name work           # Save with custom name
-outlook signature-list                       # List saved signatures
-outlook signature-show default               # Preview a signature
-outlook signature-delete old-sig             # Delete a signature
-outlook signature-delete old-sig -y          # Delete without confirmation
-```
-
-Signatures are stored per profile in `~/.config/outlook-cli/accounts/<profile>/signatures/`.
-
-### Scheduled Send
-
-```bash
-outlook schedule "to@email.com" "Subject" "Body" "+1h"              # Schedule 1 hour from now
-printf 'Scheduled body' | outlook schedule "to@email.com" "Subject" "+1h" --body-file -
-outlook schedule "to@email.com" "Subject" "Body" "+30m" -y          # Schedule 30 min, skip confirm
-outlook schedule "to@email.com" "Subject" "Body" "tomorrow 09:00"   # Schedule for tomorrow
-outlook schedule "to@email.com" "Subject" "Body" "2026-03-15T10:00" # Exact datetime
-outlook schedule "to@email.com" "Subject" "Body" "+2h30m"           # Relative offset
-outlook schedule "to@email.com" "Subject" "Body" "+1h" --html       # HTML body
-outlook schedule "to@email.com" "Subject" "Body" "+1h" -s default   # With signature
-outlook schedule "to@email.com" "Report" "See attached" "+1h" -a report.pdf  # With attachment
-outlook schedule "to@email.com" "Subject" "Body" "+1h" --json       # JSON output
-
-outlook schedule-draft 3 "+1h"                                      # Schedule existing draft
-outlook schedule-draft 3 "tomorrow 09:00" -y                        # Skip confirmation
-
-outlook schedule-list                                                # List all scheduled emails
-outlook schedule-list --json                                         # JSON output
-
-outlook schedule-cancel 1                                            # Cancel + delete draft from server
-outlook schedule-cancel 1 -y                                         # Skip confirmation
-```
-
-**Time formats:** `+30m`, `+1h`, `+2h30m` (relative), `today 17:00`, `tomorrow 09:00` (day-relative), `2026-03-15T10:00` or `2026-03-15 10:00` (absolute ISO).
-
-**How it works:** `schedule-list` cross-references local tracking with Drafts folder to find matching drafts. `schedule-cancel` deletes the draft from server (preventing delivery) and removes local tracking. Status shows `draft` when a server match is found, `queued` when only locally tracked.
-
-**Workflow: Schedule a reply draft:**
-```bash
-outlook reply-draft 3 "Will review tomorrow"   # Create reply draft
-outlook folder Drafts -n 1                      # Find draft number
-outlook schedule-draft 42 "tomorrow 09:00"      # Schedule the reply
-outlook schedule-list                            # Verify it's scheduled
-```
-
-### Message Management
-
-```bash
-outlook mark-read 3                # Mark as read
-outlook mark-read 3 --unread       # Mark as unread
-outlook mark-read 1 2 3            # Mark multiple as read
-outlook move 3 "Archive"            # Move to folder (accepts display name)
-outlook move 1 2 3 "Archive"        # Move multiple messages
-outlook delete 3                   # Delete (with confirmation)
-outlook delete 1 2 3 -y            # Delete multiple without confirmation
-outlook flag 3                     # Flag for follow-up
-outlook flag 3 4 5                 # Flag multiple messages
-outlook flag 3 --due tomorrow      # Flag with due date
-outlook flag 3 --due 2026-03-20    # Flag with specific date
-outlook flag 3 --due +3d           # Flag due in 3 days
-outlook flag 3 --complete          # Mark flag as complete
-outlook flag 3 --clear             # Remove flag
-outlook pin 3                     # Pin to top of inbox
-outlook pin 3 4 5                 # Pin multiple messages
-outlook pin 3 --unpin             # Unpin message
-outlook open 3                   # Open message or event in browser
-outlook open 3 --print-url       # Print the OWA URL instead of opening
-```
-
-### Attachments
-
-```bash
-outlook attachments 3              # List attachments
-outlook attachments 3 -d           # Download all
-outlook attachments 3 -d --save-to ~/Downloads
-outlook attachments 3 --json
-```
-
-### Calendar
-
-```bash
-outlook calendar                                    # Next 7 days
-outlook calendar --days 14                          # Next 14 days
-outlook calendar --days -7                          # Past 7 days
-outlook calendar --days -30                         # Past 30 days
-outlook calendar --timezone Asia/Shanghai           # Convert times to timezone
-outlook calendar --timezone UTC+8                   # Fixed offset also works
-outlook calendar --calendar "John Smith"             # View a shared/other calendar
-outlook calendar --calendar "John" --days 5         # Partial name match works
-outlook calendar --json -o events.json
-```
-
-### Events
-
-```bash
-outlook event 42                                    # View event details (attendees, recurrence, etc.)
-
-# Create
-outlook event-create "Meeting" "2026-03-16 10:00" "2026-03-16 11:00"
-outlook event-create "Meeting" "tomorrow 14:00" "tomorrow 15:00" \
-  -a john@example.com -a jane@example.com \
-  -l "Room A" -b "Agenda: Q1 review" -y
-outlook event-create "Standup" "tomorrow 09:00" "tomorrow 09:30" \
-  --teams -a team@example.com                       # Teams online meeting
-
-# Recurring events
-outlook event-create "Weekly Sync" "2026-03-16 10:00" "2026-03-16 11:00" \
-  --repeat weekly --repeat-count 8 -a team@example.com
-outlook event-create "Daily Standup" "2026-03-16 09:00" "2026-03-16 09:15" \
-  --repeat daily --repeat-until 2026-04-30
-outlook event-create "Sprint Review" "2026-03-16 14:00" "2026-03-16 15:00" \
-  --repeat weekly --repeat-days Monday,Wednesday --repeat-count 12
-outlook event-create "Monthly Report" "2026-03-16 10:00" "2026-03-16 11:00" \
-  --repeat monthly --repeat-count 6
-
-# Update
-outlook event-update 42 --subject "New Title"
-outlook event-update 42 --start "2026-03-16 14:00" --end "2026-03-16 15:00"
-outlook event-update 42 --location "Room B"
-outlook event-update 42 --add-attendee new@example.com
-outlook event-update 42 --remove-attendee old@example.com
-
-# Delete
-outlook event-delete 42                             # Delete single event/occurrence
-outlook event-delete 42 --series                    # Delete entire recurring series
-outlook event-delete 42 43 44 -y                    # Delete multiple
-
-# Respond to meeting invitations
-outlook event-respond 42 accept
-outlook event-respond 42 decline --comment "Can't make it"
-outlook event-respond 42 tentative --silent          # Don't notify organizer
-
-# Recurring event instances
-outlook event-instances 42                           # List all occurrences (90 days)
-outlook event-instances 42 --days 180                # Look further ahead
-```
-
-**Time formats for events:** `+1h`, `+30m`, `+2h30m` (relative), `today 17:00`, `tomorrow 09:00` (day-relative), `2026-03-15T10:00` or `2026-03-15 10:00` (absolute ISO).
-
-**Recurrence options:** `--repeat daily|weekly|monthly`, `--repeat-interval N` (default 1), `--repeat-count N` (number of occurrences), `--repeat-until YYYY-MM-DD`, `--repeat-days Monday,Wednesday` (for weekly).
-
-### Calendars / Free-Busy / People
-
-```bash
-outlook calendars                                    # List all calendars (own + shared)
-outlook calendars --json
-
-outlook free-busy "john@example.com" tomorrow         # Find free slots
-outlook free-busy "a@b.com,c@d.com" 2026-03-16 -d 30 # 30-min duration slots
-outlook free-busy "team@example.com" today --start-hour 14 --end-hour 18
-
-outlook people-search "john"                          # Find people for attendee autocomplete
-outlook people-search "john" --max 5 --json
-```
-
-### Contacts
-
-```bash
-outlook contacts                   # List contacts
-outlook contacts --max 100
-outlook contacts --json -o contacts.json
-```
-
-## JSON / Scripting
-
-**Auto-JSON on pipe:** When stdout is piped (not a terminal), all commands automatically output JSON — no `--json` flag needed.
-
-```bash
-outlook inbox | jq '.data[0].subject'           # auto-JSON when piped
-outlook inbox --json                              # explicit JSON in terminal
-outlook inbox --json -o emails.json               # save raw JSON to file
-outlook search "keyword" | jq '.data | length'
-outlook categories | jq '.data[].Category'
-```
-
-**Structured envelope:** All JSON output is wrapped in a standard envelope:
-
-```json
-{"ok": true, "schema_version": "1", "data": [...]}
-```
-
-Errors also return structured JSON (when in JSON mode):
-
-```json
-{"ok": false, "schema_version": "1", "error": {"code": "not_found", "message": "..."}}
-```
-
-Error codes: `session_expired`, `rate_limited`, `not_found`, `not_authenticated`, `unknown_error`.
-
-### JSON Field Names
-
-Email objects (`inbox`, `search`, `folder` with `--json`):
-
-| Field | Type | Example |
-|-------|------|---------|
-| `id` | string | Outlook message ID |
-| `display_num` | int | `3` |
-| `subject` | string | `"Re: Meeting"` |
-| `sender` | object | `{"name": "John", "address": "john@x.com"}` |
-| `to` | list[object] | `[{"name": "Jane", "address": "jane@x.com"}]` |
-| `cc` | list[object] | same as `to` |
-| `received` | string | `"2026-03-09T14:30:00Z"` |
-| `preview` | string | first ~255 chars of body |
-| `body` | string | full body text |
-| `body_type` | string | `"Text"` or `"HTML"` |
-| `is_read` | bool | `true` |
-| `has_attachments` | bool | `false` |
-| `importance` | string | `"Normal"` |
-| `conversation_id` | string | Outlook conversation ID |
-| `categories` | list[string] | `["Spam", "FYI"]` |
-| `flag_status` | string | `"notFlagged"`, `"flagged"`, `"complete"` |
-| `flag_due` | string\|null | `"2026-03-20T23:59:59"` or `null` |
-| `scheduled_send` | string\|null | `"2026-03-15T10:00:00Z"` or `null` |
-
-Event objects (`calendar`, `event`, `event-instances` with `--json`):
-
-| Field | Type | Example |
-|-------|------|---------|
-| `id` | string | Outlook event ID |
-| `display_num` | int | `42` |
-| `subject` | string | `"Weekly Sync"` |
-| `start` | string | `"2026-03-16T10:00:00"` |
-| `end` | string | `"2026-03-16T11:00:00"` |
-| `location` | string | `"Room A"` |
-| `organizer` | object | `{"name": "John", "address": "john@x.com"}` |
-| `attendees` | list[object] | `[{"email": {...}, "type": "Required", "response": "Accepted"}]` |
-| `is_all_day` | bool | `false` |
-| `show_as` | string | `"Busy"` |
-| `response_status` | string | `"Accepted"`, `"NotResponded"`, `"Organizer"` |
-| `recurrence` | object\|null | `{"Pattern": {...}, "Range": {...}}` |
-| `event_type` | string | `"SingleInstance"`, `"Occurrence"`, `"SeriesMaster"` |
-| `is_online_meeting` | bool | `true` |
-| `online_meeting_url` | string | Teams join URL |
-
-Folder objects (`folders --json`):
-`name` (string), `unread_count` (int), `total_count` (int)
-
-Category objects (`categories --json`):
-`Category` (string), `Color` (string), `Unread` (int), `Total` (int)
-
-## Common Patterns for AI Agents
-
-```bash
-# Quick inbox check with unread count
-outlook inbox --max 10
-
-# Find emails from a specific person
-outlook inbox --from "bob.wilson"
-
-# Find emails by subject
-outlook inbox --subject "deployment" --unread
-
-# Read the latest email from someone
-outlook inbox --from "alice" --max 1 --json
-
-# Check unread count without fetching emails
-outlook folders --json | jq '.[] | select(.name == "Inbox") | .unread_count'
-
-# Search across all folders
-outlook search "deployment failed" --max 5
-
-# Today's calendar
-outlook calendar --days 1
-
-# Monday's meetings on a shared calendar
-outlook calendar --calendar "John Smith" --days 5
-
-# Create a recurring weekly standup
-outlook event-create "Standup" "2026-03-16 09:00" "2026-03-16 09:15" \
-  --repeat weekly --repeat-count 8 -a team@example.com -y
-
-# Check someone's availability for a meeting
-outlook free-busy "colleague@company.com" tomorrow -d 30
-
-# Find someone's email for invitation
-outlook people-search "john"
-
-# Accept a meeting invitation
-outlook event-respond 42 accept
-
-# View event with attendees
-outlook event 42
-
-# View full conversation thread
-outlook thread 3
-
-# Send a quick reply
-outlook reply 3 "Received, will review today."
-
-# Send email with attachments
-outlook send "to@email.com" "Report" "See attached" -a report.pdf -a data.xlsx -y
-
-# Download all attachments from a message
-outlook attachments 5 -d --save-to ~/Downloads
-
-# Flag message for follow-up with due date
-outlook flag 3 --due tomorrow
-
-# Pin important messages to top of inbox
-outlook pin 3 4
-
-# Categorize a batch of messages
-outlook categorize 1 2 3 "FYI"
-
-# List categories to see what's available
-outlook categories
-
-# Create a new category for a project
-outlook category-create "Project Alpha" --color 7
-
-# Schedule an email for later
-outlook schedule "to@email.com" "Meeting notes" "Attached." "+1h"
-
-# Schedule a reply for tomorrow morning
-outlook reply-draft 3 "Will review this"
-outlook schedule-draft 42 "tomorrow 09:00"
-
-# Check scheduled emails
-outlook schedule-list
-
-# Open a message or event in the browser
-outlook open 3
-outlook open 42 --print-url
-```
-
-## ID System
-
-Messages and events get short display numbers (#1, #2, #3...) mapped to real Outlook IDs. Numbers are assigned when listing and persist across commands. Messages and events share the same ID map (capped at 500 entries).
-The ID map is profile-local, so `#3` in one account is unrelated to `#3` in another.
-
-```bash
-outlook inbox --max 5      # Shows #1-#5
-outlook read 3             # Read message #3
-outlook reply 3 "OK"       # Reply to #3
-outlook calendar --days 7  # Shows event #42, #43...
-outlook event 42           # View event details
-outlook event-respond 42 accept
-```
-
-## Error Handling
-
-- Token expired → auto re-login attempted via cached SSO state.
-- `Account profile 'X' not found` → run `outlook account add X` first, or use `outlook account list`.
-- `Unknown message #N` → run `outlook inbox` or `outlook calendar` first to populate the ID map.
-- `Folder 'X' not found` → run `outlook folders` to see available folder names.
-- `Calendar 'X' not found` → run `outlook calendars` to see available calendar names.
-- `Category 'X' not found` → run `outlook categories` to see available categories.
-- HTTP 429 → automatic exponential backoff (3 retries).
-
-## Safety Notes
-
-- Token is cached with `chmod 600` (owner-only read/write).
-- Browser state saved for SSO — avoids repeated logins.
-- Tokens, browser state, signatures, scheduled-send tracking, and ID maps are scoped per account profile.
-- `send`, `reply`, `forward`, `draft-send`, `schedule`, `schedule-draft`, `event-create`, `event-delete`, `delete`, and `category-delete` ask for confirmation by default (use `-y` to skip).
-- `flag`, `pin`, `mark-read`, `categorize` do NOT require confirmation (safe, reversible operations).
-- Do not share or log bearer tokens — they grant full mailbox access.
-- Prefer `outlook login` over manually copying tokens.
+Exit codes: 0 success, 1 failure/partial, 2 invalid usage, 4 auth, 5 not found, 7 throttled, 8 retryable transport, 10 account/config, 130 interrupted. Bulk commands use nonzero failure status with per-item details. Use `outlook COMMAND --profile` for stderr timing, request/retry counts and bytes; do not claim a speedup without measurement.

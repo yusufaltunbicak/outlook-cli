@@ -7,6 +7,8 @@ from datetime import datetime, timedelta
 
 import click
 
+from ._batch import run_items
+
 from ._common import _get_client, _handle_api_error, account_option, confirm_action, maybe_dry_run, print_success
 
 
@@ -17,11 +19,14 @@ from ._common import _get_client, _handle_api_error, account_option, confirm_act
 @_handle_api_error
 def mark_read(message_ids: tuple, unread: bool, account_name: str | None):
     """Mark messages as read (or unread with --unread). Accepts multiple IDs."""
+    maybe_dry_run("mark-read", {"message_ids": list(message_ids), "unread": unread})
     client = _get_client()
     status = "unread" if unread else "read"
-    for mid in message_ids:
+    def action(mid):
         client.mark_read(mid, is_read=not unread)
         print_success(f"Message #{mid} marked as {status}")
+        return {"status": status}
+    return run_items(message_ids, "mark-read", action)
 
 
 @click.command()
@@ -33,9 +38,12 @@ def move(message_ids: tuple, destination: str, account_name: str | None):
     """Move messages to another folder. Accepts multiple IDs."""
     maybe_dry_run("move", {"message_ids": list(message_ids), "destination": destination})
     client = _get_client()
-    for mid in message_ids:
-        client.move_message(mid, destination)
+    target = client._resolve_folder(destination) if hasattr(client, "_resolve_folder") else destination
+    def action(mid):
+        result = client.move_message(mid, target)
         print_success(f"Message #{mid} moved to {destination}")
+        return result
+    return run_items(message_ids, "move", action)
 
 
 @click.command()
@@ -47,9 +55,12 @@ def copy(message_ids: tuple, destination: str, account_name: str | None):
     """Copy messages to another folder. Accepts multiple IDs."""
     maybe_dry_run("copy", {"message_ids": list(message_ids), "destination": destination})
     client = _get_client()
-    for mid in message_ids:
-        client.copy_message(mid, destination)
+    target = client._resolve_folder(destination) if hasattr(client, "_resolve_folder") else destination
+    def action(mid):
+        result = client.copy_message(mid, target)
         print_success(f"Message #{mid} copied to {destination}")
+        return result
+    return run_items(message_ids, "copy", action)
 
 
 @click.command()
@@ -64,9 +75,11 @@ def delete(message_ids: tuple, yes: bool, account_name: str | None):
         ids_str = ", ".join(f"#{m}" for m in message_ids)
         confirm_action(f"Delete {ids_str}?", action=f"delete {ids_str}")
     client = _get_client()
-    for mid in message_ids:
+    def action(mid):
         client.delete_message(mid)
         print_success(f"Message #{mid} deleted")
+        return {"status": "deleted"}
+    return run_items(message_ids, "delete", action)
 
 
 def _parse_due_date(s: str) -> str:
@@ -140,7 +153,7 @@ def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool, accou
         },
     )
     client = _get_client()
-    for mid in message_ids:
+    def action(mid):
         client.set_flag(mid, status=status, due_date=due_date)
         if status == "flagged" and due_date:
             print_success(f"Message #{mid} flagged (due: {due_date})")
@@ -150,6 +163,8 @@ def flag(message_ids: tuple, due: str | None, complete: bool, clear: bool, accou
             print_success(f"Message #{mid} flag marked complete")
         else:
             print_success(f"Message #{mid} flag cleared")
+        return {"flag_status": status, "due_date": due_date}
+    return run_items(message_ids, "flag", action)
 
 
 @click.command()
@@ -174,7 +189,9 @@ def pin(message_ids: tuple, unpin: bool, account_name: str | None):
         },
     )
     client = _get_client()
-    for mid in message_ids:
+    def action(mid):
         client.pin_message(mid, pinned=not unpin)
-        action = "unpinned" if unpin else "pinned"
-        print_success(f"Message #{mid} {action}")
+        status = "unpinned" if unpin else "pinned"
+        print_success(f"Message #{mid} {status}")
+        return {"status": status}
+    return run_items(message_ids, "pin", action)

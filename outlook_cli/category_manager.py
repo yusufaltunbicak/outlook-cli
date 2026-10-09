@@ -15,6 +15,11 @@ from __future__ import annotations
 
 import json
 import time
+import hashlib
+from contextlib import contextmanager
+from pathlib import Path
+
+import click
 import uuid
 from datetime import datetime, timezone
 from typing import Callable
@@ -23,30 +28,53 @@ from urllib.parse import quote
 import httpx
 
 from .constants import BASE_URL, USER_AGENT
-from .exceptions import ResourceNotFoundError, TokenExpiredError
+from .exceptions import ResourceNotFoundError, TokenExpiredError, PartialFailureError
+from . import account as account_service
+from .locking import file_lock, atomic_write_json
+from .transport import request_json
 
 OWA_SERVICE_BASE = "https://outlook.cloud.microsoft/owa/service.svc"
 
 
+def bind_client(client) -> None:
+    """Reuse an invocation's HTTP pools and token refresh for standalone helpers."""
+    ctx = click.get_current_context(silent=True)
+    if ctx is not None:
+        ctx.meta["outlook_manager_client"] = client
+
+
+def _request(client, method, path, **kwargs):
+    bound = _bound_client()
+    return request_json(client, method, path, account_name=getattr(bound, "account_name", None), **kwargs)
+
+
+def _bound_client():
+    ctx = click.get_current_context(silent=True)
+    return ctx.meta.get("outlook_manager_client") if ctx is not None else None
+
+
+@contextmanager
+def _session(token: str, *, owa=False):
+    bound = _bound_client()
+    if bound is not None:
+        client = bound._session("owa") if owa else bound._client
+        yield client, getattr(bound, "_refresh_token", None)
+    else:
+        client = httpx.Client(headers={"Authorization": f"Bearer {token}",
+            "Content-Type": "application/json", "User-Agent": USER_AGENT}, timeout=30)
+        try:
+            yield client, None
+        finally:
+            client.close()
+
+
 def _owa_request(token: str, action: str, payload: dict) -> dict:
-    """Send OWA service.svc request with x-owa-urlpostdata pattern."""
-    resp = httpx.post(
-        f"{OWA_SERVICE_BASE}?action={action}",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "User-Agent": USER_AGENT,
-            "Content-Type": "application/json; charset=utf-8",
-            "Action": action,
-            "x-req-source": "Mail",
-            "x-owa-urlpostdata": quote(json.dumps(payload), safe=""),
-        },
-        content=b"",
-        timeout=15,
-    )
-    if resp.status_code == 401:
-        raise TokenExpiredError("Token expired. Run: outlook login")
-    resp.raise_for_status()
-    return resp.json()
+    """Use the shared retry/refresh policy for OWA calls."""
+    with _session(token, owa=True) as (client, refresh):
+        return _request(client, "POST", f"{OWA_SERVICE_BASE}?action={action}",
+            headers={"Content-Type": "application/json; charset=utf-8", "Action": action,
+                "x-req-source": "Mail", "x-owa-urlpostdata": quote(json.dumps(payload), safe="")},
+            content=b"", refresh=refresh, retry_safe=action == "GetOwaUserConfiguration")
 
 
 def _update_master_categories(
@@ -117,6 +145,9 @@ def rename_category(
     master = get_master_categories(token)
     existing = next((c for c in master if c["Name"] == old_name), None)
     if not existing:
+        checkpoint = _checkpoint_path(old_name, new_name, None)
+        if propagate and checkpoint.exists() and any(c["Name"] == new_name for c in master):
+            return _bulk_rename_on_messages(token, old_name, new_name, on_progress)
         raise ResourceNotFoundError(f"Category '{old_name}' not found.")
 
     new_cat = {
@@ -132,128 +163,88 @@ def rename_category(
     return _bulk_rename_on_messages(token, old_name, new_name, on_progress)
 
 
-def _bulk_rename_on_messages(
-    token: str,
-    old_name: str,
-    new_name: str,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> int:
-    """Rename a category label on all messages that have it."""
-    client = httpx.Client(
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=30,
-    )
-    total = 0
-    try:
-        while True:
-            r = client.get(
-                f"{BASE_URL}/messages",
-                params={
-                    "$top": 50,
-                    "$filter": f"Categories/any(c:c eq '{old_name}')",
-                    "$select": "Id,Categories",
-                },
-            )
-            if r.status_code == 429:
-                time.sleep(int(r.headers.get("Retry-After", 5)))
-                continue
-            if r.status_code != 200:
-                break
-            msgs = r.json().get("value", [])
-            if not msgs:
-                break
-            for m in msgs:
-                new_cats = [new_name if c == old_name else c for c in m["Categories"]]
-                for attempt in range(3):
+def _checkpoint_path(name: str, replacement: str | None, folder: str | None) -> Path:
+    bound = _bound_client()
+    selected = account_service.resolve_account_name(getattr(bound, "account_name", None))
+    operation = json.dumps([name, replacement, folder], ensure_ascii=False)
+    digest = hashlib.sha256(operation.encode()).hexdigest()[:20]
+    return account_service.get_account_paths(selected).cache_dir / "operations" / f"category-{digest}.json"
+
+
+def _bulk_rename_on_messages(token, old_name, new_name, on_progress=None) -> int:
+    return _bulk_categories(token, old_name, new_name, on_progress=on_progress)
+
+
+def clear_category(token, name, folder=None, max_messages=None, on_progress=None) -> int:
+    """Clear labels with finite retries and a durable, automatic resume checkpoint."""
+    return _bulk_categories(token, name, None, folder=folder,
+        max_messages=max_messages, on_progress=on_progress)
+
+
+def _bulk_categories(token, name, replacement, *, folder=None, max_messages=None, on_progress=None):
+    checkpoint = _checkpoint_path(name, replacement, folder)
+    with file_lock(checkpoint.with_suffix(".lock")):
+        state = json.loads(checkpoint.read_text()) if checkpoint.exists() else {
+            "name": name, "replacement": replacement, "folder": folder, "completed": [], "failures": []}
+        completed = set(state.get("completed", []))
+        initial_count = len(completed)
+        failures = []
+
+        def persist():
+            state.update(completed=sorted(completed), failures=failures)
+            atomic_write_json(checkpoint, state)
+
+        def stopped(reason):
+            persist()
+            raise PartialFailureError(f"{reason} Updated {len(completed)} messages. "
+                f"Repeat the same command to resume. Checkpoint: {checkpoint}",
+                completed=len(completed), failures=failures, checkpoint=checkpoint)
+
+        persist()
+        with _session(token) as (client, refresh):
+            path = f"{BASE_URL}/MailFolders/{quote(folder, safe='')}/messages" if folder else f"{BASE_URL}/messages"
+            escaped = name.replace("'", "''")
+            for page in range(1000):
+                try:
+                    data = _request(client, "GET", path, params={"$top": 50,
+                        "$filter": f"Categories/any(c:c eq '{escaped}')", "$select": "Id,Categories"}, refresh=refresh)
+                except Exception as exc:
+                    failures.append({"id": None, "message": str(exc), "phase": "list"})
+                    stopped("Category enumeration failed.")
+                messages = data.get("value", [])
+                if not messages:
+                    checkpoint.unlink(missing_ok=True)
+                    return len(completed)
+                progress = 0
+                for message in messages:
+                    item_id = message["Id"]
+                    if item_id in completed:
+                        continue
+                    categories = list(dict.fromkeys(replacement if category == name else category
+                        for category in message.get("Categories", []) if replacement is not None or category != name))
                     try:
-                        r2 = client.patch(
-                            f"{BASE_URL}/messages/{m['Id']}",
-                            json={"Categories": new_cats},
-                        )
-                        if r2.status_code == 200:
-                            total += 1
-                            break
-                        elif r2.status_code == 429:
-                            time.sleep(int(r2.headers.get("Retry-After", 5)))
-                        else:
-                            time.sleep(2)
-                    except httpx.ReadTimeout:
-                        time.sleep(3)
-            if on_progress:
-                on_progress(total, -1)
-    finally:
-        client.close()
-    return total
-
-
-def clear_category(
-    token: str,
-    name: str,
-    folder: str | None = None,
-    max_messages: int | None = None,
-    on_progress: Callable[[int, int], None] | None = None,
-) -> int:
-    """Remove a category label from messages. Does not touch master category list.
-
-    Args:
-        folder: Limit to a specific folder (e.g. "Inbox"). None = all folders.
-        max_messages: Stop after clearing this many messages. None = all.
-
-    Returns the number of messages updated.
-    """
-    client = httpx.Client(
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        timeout=30,
-    )
-    total = 0
-    try:
-        while True:
-            if folder:
-                url = f"{BASE_URL}/MailFolders/{folder}/messages"
-            else:
-                url = f"{BASE_URL}/messages"
-            r = client.get(
-                url,
-                params={
-                    "$top": 50,
-                    "$filter": f"Categories/any(c:c eq '{name}')",
-                    "$select": "Id,Categories",
-                },
-            )
-            if r.status_code == 429:
-                time.sleep(int(r.headers.get("Retry-After", 5)))
-                continue
-            if r.status_code != 200:
-                break
-            msgs = r.json().get("value", [])
-            if not msgs:
-                break
-            for m in msgs:
-                new_cats = [c for c in m["Categories"] if c != name]
-                for attempt in range(3):
-                    try:
-                        r2 = client.patch(
-                            f"{BASE_URL}/messages/{m['Id']}",
-                            json={"Categories": new_cats},
-                        )
-                        if r2.status_code == 200:
-                            total += 1
-                            break
-                        elif r2.status_code == 429:
-                            time.sleep(int(r2.headers.get("Retry-After", 5)))
-                        else:
-                            time.sleep(2)
-                    except httpx.ReadTimeout:
-                        time.sleep(3)
-                if max_messages and total >= max_messages:
-                    break
-            if on_progress:
-                on_progress(total, -1)
-            if max_messages and total >= max_messages:
-                break
-    finally:
-        client.close()
-    return total
+                        _request(client, "PATCH", f"{BASE_URL}/messages/{quote(item_id, safe='')}",
+                            json={"Categories": categories}, refresh=refresh)
+                        completed.add(item_id)
+                        progress += 1
+                        persist()
+                    except Exception as exc:
+                        failures.append({"id": item_id, "message": str(exc), "phase": "update"})
+                    if max_messages and len(completed) - initial_count >= max_messages:
+                        if on_progress:
+                            on_progress(len(completed), -1)
+                        if failures:
+                            stopped("Some category updates failed.")
+                        persist()
+                        return len(completed)
+                if on_progress:
+                    on_progress(len(completed), -1)
+                if failures:
+                    stopped("Some category updates failed.")
+                if not progress:
+                    failures.append({"id": None, "message": "Repeated page without progress", "phase": "list"})
+                    stopped("Category propagation made no progress.")
+            stopped("Category propagation reached the 1000-page safety limit.")
 
 
 def recolor_category(token: str, name: str, color: int) -> dict:

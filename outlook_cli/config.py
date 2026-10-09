@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from copy import deepcopy
 
 import yaml
 
@@ -21,11 +22,13 @@ DEFAULTS = {
 
 def load_config(path: Path | None = None) -> dict:
     """Load YAML config, falling back to defaults for missing keys."""
-    cfg = dict(DEFAULTS)
+    cfg = deepcopy(DEFAULTS)
     p = path or CONFIG_FILE
     if p.exists():
         with open(p) as f:
             user = yaml.safe_load(f) or {}
+        if not isinstance(user, dict):
+            raise ValueError("Config must contain a YAML mapping.")
         _deep_merge(cfg, user)
     return cfg
 

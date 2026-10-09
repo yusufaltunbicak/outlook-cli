@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import click
 
+from ._batch import run_items
+from ..category_manager import bind_client
+
 from ._common import (
     _get_client,
     _handle_api_error,
@@ -47,9 +50,11 @@ def categorize(message_ids: tuple, category: str, account_name: str | None):
     """Add a category to messages. Accepts multiple IDs."""
     maybe_dry_run("categorize", {"message_ids": list(message_ids), "category": category})
     client = _get_client()
-    for mid in message_ids:
+    def action(mid):
         result = client.add_category(mid, category)
         print_success(f"Message #{mid} categorized as: {', '.join(result)}")
+        return {"categories": result}
+    return run_items(message_ids, "categorize", action, workers=4)
 
 
 @click.command()
@@ -61,12 +66,14 @@ def uncategorize(message_ids: tuple, category: str, account_name: str | None):
     """Remove a category from messages. Accepts multiple IDs."""
     maybe_dry_run("uncategorize", {"message_ids": list(message_ids), "category": category})
     client = _get_client()
-    for mid in message_ids:
+    def action(mid):
         result = client.remove_category(mid, category)
         if result:
             print_success(f"Message #{mid} categories: {', '.join(result)}")
         else:
             print_success(f"Message #{mid} has no categories.")
+        return {"categories": result}
+    return run_items(message_ids, "uncategorize", action, workers=4)
 
 
 @click.command("category-rename")
@@ -79,14 +86,18 @@ def category_rename(old_name: str, new_name: str, no_propagate: bool, account_na
     """Rename a master category and update all messages."""
     from ..category_manager import rename_category
 
+    maybe_dry_run("category-rename", {"old_name": old_name, "new_name": new_name, "no_propagate": no_propagate})
     def on_progress(done, _total):
         console.print(f"  [dim]{done} messages updated...[/dim]")
 
-    token = get_token()
+    client = _get_client()
+    bind_client(client)
+    token = client._token
     count = rename_category(token, old_name, new_name, propagate=not no_propagate, on_progress=on_progress)
     print_success(f"Renamed '{old_name}' → '{new_name}'")
     if count:
         print_success(f"  {count} messages updated")
+    return {"status": "renamed", "old_name": old_name, "new_name": new_name, "updated_count": count}
 
 
 @click.command("category-clear")
@@ -115,9 +126,12 @@ def category_clear(name: str, folder: str | None, max_messages: int | None, yes:
     def on_progress(done, _total):
         console.print(f"  [dim]{done} messages cleared...[/dim]")
 
-    token = get_token()
+    client = _get_client()
+    bind_client(client)
+    token = client._token
     count = clear_category(token, name, folder=folder, max_messages=max_messages, on_progress=on_progress)
     print_success(f"Cleared '{name}' from {count} messages")
+    return {"status": "cleared", "name": name, "updated_count": count}
 
 
 @click.command("category-delete")
@@ -140,7 +154,9 @@ def category_delete(name: str, no_propagate: bool, yes: bool, account_name: str 
             action=f"delete category '{name}' and remove it from messages",
         )
 
-    token = get_token()
+    client = _get_client()
+    bind_client(client)
+    token = client._token
 
     if not no_propagate:
         def on_progress(done, _total):
@@ -162,6 +178,9 @@ def category_delete(name: str, no_propagate: bool, yes: bool, account_name: str 
 def category_create(name: str, color: int, account_name: str | None):
     """Create a new master category."""
     from ..category_manager import create_category
-    token = get_token()
+    maybe_dry_run("category-create", {"name": name, "color": color})
+    client = _get_client()
+    bind_client(client)
+    token = client._token
     create_category(token, name, color=color)
     print_success(f"Created category '{name}'")

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import os
+from concurrent.futures import ThreadPoolExecutor
+
+from ..recipients import normalize_recipients
+from ..exceptions import error_code_for_exception
+from ..serialization import message_fetch_options
 
 import click
 
 from ._common import (
     _get_client,
+    is_dry_run_mode,
     _handle_api_error,
     _wants_json,
     account_option,
@@ -15,6 +21,7 @@ from ._common import (
     cfg,
     console,
     get_category_color_map,
+    get_account_name,
     maybe_dry_run,
     print_email,
     print_email_raw,
@@ -91,6 +98,7 @@ def inbox(
         filter_has_attachments=has_attachments,
         filter_category=category,
         filter_no_category=no_category,
+        **message_fetch_options(),
     )
 
     if _wants_json(as_json):
@@ -116,53 +124,104 @@ def inbox(
             print_inbox(messages, category_colors=get_category_color_map(client, messages))
 
 
+def _bulk_read(client, message_ids, *, thread_mode=False, peek=False, workers=4):
+    def fetch(mid):
+        try:
+            data = client.get_thread(mid) if thread_mode else client.get_message(mid)
+            row = {"id": mid, "ok": True, "data": data}
+            if not thread_mode and not peek and not data.is_read:
+                try:
+                    client.mark_read(mid)
+                except Exception as exc:
+                    row["ok"] = False
+                    row["error"] = {"code": error_code_for_exception(exc), "message": "Message fetched but marking read failed: " + str(exc)}
+            if getattr(data, "meta", None):
+                row["meta"] = data.meta
+            return row
+        except Exception as exc:
+            return {"id": mid, "ok": False, "error": {"code": error_code_for_exception(exc), "message": str(exc)}}
+    with ThreadPoolExecutor(max_workers=min(workers, len(message_ids))) as pool:
+        return list(pool.map(fetch, message_ids))
+
+
 @click.command()
-@click.argument("message_id")
+@click.argument("message_ids", nargs=-1, required=True)
 @click.option("--raw", is_flag=True, help="Show raw HTML body")
+@click.option("--peek", is_flag=True, help="Read without marking the message read")
+@click.option("--workers", type=click.IntRange(1, 4), default=4, help="Maximum concurrent reads (1-4)")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
 @account_option
 @_handle_api_error
-def read(message_id: str, raw: bool, as_json: bool, account_name: str | None):
-    """Read an email by its display number."""
+def read(message_ids: tuple, raw: bool, peek: bool, workers: int, as_json: bool, account_name: str | None):
+    """Read one or more real IDs or persistent display numbers, in input order."""
+    if is_dry_run_mode():
+        peek = True
+    client = _get_client()
+    results = _bulk_read(client, message_ids, peek=peek, workers=workers)
+    failed = sum(not row["ok"] for row in results)
+    if _wants_json(as_json):
+        single = len(results) == 1 and not failed
+        data = results[0]["data"] if single else results
+        click.echo(to_json_envelope(data, ok=not failed, meta={"returned": len(results), "failed": failed, "partial": bool(failed and failed < len(results))}, error={"code": "partial_failure", "message": f"{failed} message operation(s) failed"} if failed else None))
+    else:
+        for row in results:
+            if "data" in row:
+                (print_email_raw if raw else print_email)(row["data"])
+            if not row["ok"]:
+                click.echo(f"{row['id']}: {row['error']['message']}", err=True)
+    if failed:
+        raise click.exceptions.Exit(1)
+
+
+@click.command()
+@click.argument("message_ids", nargs=-1, required=True)
+@click.option("--workers", type=click.IntRange(1, 4), default=4, help="Maximum concurrent thread reads (1-4)")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
+@_handle_api_error
+def thread(message_ids: tuple, workers: int, as_json: bool, account_name: str | None):
+    """Read one or more conversations; completeness is reported in metadata."""
+    from ..formatter import print_thread
+    client = _get_client()
+    results = _bulk_read(client, message_ids, thread_mode=True, workers=workers)
+    failed = sum(not row["ok"] for row in results)
+    if _wants_json(as_json):
+        single = len(results) == 1 and not failed
+        data = results[0]["data"] if single else results
+        click.echo(to_json_envelope(data, ok=not failed, meta={"failed": failed, "partial": bool(failed and failed < len(results))}, error={"code": "partial_failure", "message": f"{failed} thread(s) failed"} if failed else None))
+    else:
+        for row in results:
+            if row["ok"]:
+                messages = row["data"]
+                if len(messages) <= 1:
+                    print_success("This message is not part of a conversation thread.")
+                    if messages:
+                        print_email(messages[0])
+                else:
+                    print_thread(messages)
+            else:
+                click.echo(f"{row['id']}: {row['error']['message']}", err=True)
+    if failed:
+        raise click.exceptions.Exit(1)
+
+
+@click.command("draft-verify")
+@click.argument("message_id")
+@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
+@account_option
+@_handle_api_error
+def draft_verify(message_id: str, as_json: bool, account_name: str | None):
+    """Read actual recipients and attachment metadata for an existing draft."""
+    from dataclasses import asdict
     client = _get_client()
     email = client.get_message(message_id)
-
-    if _wants_json(as_json):
-        click.echo(to_json_envelope(email))
-    elif raw:
-        print_email_raw(email)
-    else:
-        print_email(email)
-
-    # Auto mark as read
-    if not email.is_read:
-        try:
-            client.mark_read(message_id)
-        except Exception:
-            pass
-
-
-@click.command()
-@click.argument("message_id")
-@click.option("--json", "as_json", is_flag=True, help="Output as JSON")
-@account_option
-@_handle_api_error
-def thread(message_id: str, as_json: bool, account_name: str | None):
-    """Show the full conversation thread for a message."""
-    from ..formatter import print_thread
-
-    client = _get_client()
-    messages = client.get_thread(message_id)
-
-    if _wants_json(as_json):
-        click.echo(to_json_envelope(messages))
-    else:
-        if len(messages) <= 1:
-            print_success("This message is not part of a conversation thread.")
-            if messages:
-                print_email(messages[0])
-        else:
-            print_thread(messages)
+    attachments = []
+    for attachment in client.get_attachments(message_id):
+        metadata = asdict(attachment)
+        metadata.pop("content_bytes", None)
+        attachments.append(metadata)
+    data = {"id": email.id, "subject": email.subject, "to": email.to, "cc": email.cc, "attachments": attachments}
+    click.echo(to_json_envelope(data))
 
 
 @click.command()
@@ -188,11 +247,11 @@ def send(to: str, subject: str, body: str | None, cc: tuple, attach: tuple, body
 
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name:
-        sig_html = get_signature(sig_name)
+        sig_html = get_signature(sig_name, account_name=get_account_name(account_name))
         body, is_html = append_signature(body, sig_html, is_html)
 
-    to_list = [addr.strip() for addr in to.split(",")]
-    cc_list = list(cc) if cc else None
+    to_list = normalize_recipients([to, *getattr(click.get_current_context(), "_outlook_extra_to", ())], field="TO", required=True)
+    cc_list = normalize_recipients(cc, field="CC") or None
     maybe_dry_run(
         "send",
         {
@@ -252,12 +311,11 @@ def draft(to: str, subject: str, body: str | None, cc: tuple, attach: tuple, bod
 
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name:
-        sig_html = get_signature(sig_name)
+        sig_html = get_signature(sig_name, account_name=get_account_name(account_name))
         body, is_html = append_signature(body, sig_html, is_html)
 
-    client = _get_client()
-    to_list = [addr.strip() for addr in to.split(",")]
-    cc_list = list(cc) if cc else None
+    to_list = normalize_recipients([to, *getattr(click.get_current_context(), "_outlook_extra_to", ())], field="TO", required=True)
+    cc_list = normalize_recipients(cc, field="CC") or None
     maybe_dry_run(
         "draft",
         {
@@ -269,6 +327,7 @@ def draft(to: str, subject: str, body: str | None, cc: tuple, attach: tuple, bod
             "html": is_html,
         },
     )
+    client = _get_client()
     email = client.create_draft(to=to_list, subject=subject, body=body, cc=cc_list, html=is_html)
 
     if attach:
@@ -298,6 +357,7 @@ def draft_send(message_id: str, yes: bool, account_name: str | None):
         confirm_action(f"Send draft #{message_id}?", action=f"send draft #{message_id}")
     client.send_draft(message_id)
     print_success(f"Draft #{message_id} sent")
+    return {"status": "sent", "id": message_id}
 
 
 @click.command()
@@ -341,6 +401,7 @@ def reply(message_id: str, body: str | None, reply_all: bool, attach: tuple, bod
 
     action = "Reply all" if reply_all else "Reply"
     print_success(f"{action} sent for message #{message_id}")
+    return {"status": "sent", "id": message_id, "reply_all": reply_all}
 
 
 @click.command(name="reply-draft")
@@ -361,7 +422,7 @@ def reply_draft(message_id: str, body: str | None, reply_all: bool, attach: tupl
     body = resolve_body_input(body, body_file)
     sig_name = sig_name or cfg.get("default_signature")
     if sig_name and body:
-        sig_html = get_signature(sig_name)
+        sig_html = get_signature(sig_name, account_name=get_account_name(account_name))
         body, is_html = append_signature(body, sig_html, is_html)
 
     maybe_dry_run(
@@ -397,7 +458,7 @@ def reply_draft(message_id: str, body: str | None, reply_all: bool, attach: tupl
 @_handle_api_error
 def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool, account_name: str | None):
     """Forward an email."""
-    to_list = [addr.strip() for addr in to.split(",")]
+    to_list = normalize_recipients([to, *getattr(click.get_current_context(), "_outlook_extra_to", ())], field="TO", required=True)
     maybe_dry_run(
         "forward",
         {
@@ -425,3 +486,4 @@ def forward(message_id: str, to: str, comment: str, attach: tuple, yes: bool, ac
         client.forward(message_id, to_list, comment=comment)
 
     print_success(f"Message #{message_id} forwarded to {to}")
+    return {"status": "forwarded", "id": message_id, "to": to_list}

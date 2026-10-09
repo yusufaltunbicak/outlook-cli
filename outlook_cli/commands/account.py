@@ -6,7 +6,7 @@ import click
 
 from .. import account as account_service
 from ..exceptions import AccountError
-from ._common import _handle_api_error, _wants_json, confirm_action, do_login, maybe_dry_run, print_accounts, print_success, to_json_envelope
+from ._common import _handle_api_error, _wants_json, confirm_action, do_login, is_no_input_mode, maybe_dry_run, print_accounts, print_success, to_json_envelope
 
 
 @click.group()
@@ -26,6 +26,7 @@ def add_account(name: str):
     if normalized in registry.get("accounts", {}):
         raise AccountError(f"Account profile '{normalized}' already exists.")
 
+    maybe_dry_run("account.add", {"name": normalized})
     do_login(account_name=normalized, allow_create=True)
     print_success(f"Account profile '{normalized}' added.")
 
@@ -53,6 +54,7 @@ def list_accounts(as_json: bool):
 def switch_account(name: str):
     """Change the persisted active account profile."""
     normalized = account_service.normalize_account_name(name)
+    maybe_dry_run("account.switch", {"name": normalized})
     account_service.set_current_account(normalized)
     print_success(f"Switched to account '{normalized}'.")
 
@@ -94,5 +96,5 @@ def remove_account(name: str, yes: bool):
     maybe_dry_run("account.remove", {"name": normalized})
     if not yes:
         confirm_action(f"Remove account profile '{normalized}'?", action=f"remove account profile '{normalized}'")
-    account_service.remove_account(normalized)
+    account_service.remove_account(normalized, allow_interactive=not is_no_input_mode())
     print_success(f"Account profile '{normalized}' removed.")
