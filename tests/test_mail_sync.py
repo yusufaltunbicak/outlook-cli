@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from types import SimpleNamespace
 from urllib.parse import quote
 
 import httpx
 import pytest
 
+from outlook_cli import mail_sync
 from outlook_cli.constants import BASE_URL
 from outlook_cli.exceptions import (
     OutlookCliError,
@@ -14,13 +16,19 @@ from outlook_cli.exceptions import (
     ResourceNotFoundError,
 )
 from outlook_cli.graph import GRAPH_URL
-from outlook_cli.mail_sync import GraphSyncReader, removed_id, rest_record, sync_folder
+from outlook_cli.mail_sync import (
+    GraphSyncReader,
+    RestReader,
+    removed_id,
+    rest_record,
+    sync_folder,
+)
 
 FOLDER = {"id": "folder-inbox", "displayName": "Inbox"}
 
 
 def signature(backend="rest", page_size=100):
-    return f"text+attachments:v1:{backend}:{page_size}"
+    return f"text+attachments:v2:{backend}:{page_size}"
 
 
 def link(name, backend="rest"):
@@ -413,3 +421,87 @@ def test_graph_record_retains_thread_and_attachment_metadata():
     assert record["conversation_id"] == "g-thread"
     assert record["bcc"][0]["address"] == "bcc@example.com"
     assert record["attachments"][0]["name"] == "report.pdf"
+
+
+@pytest.mark.parametrize("path,tracking", [
+    ("/MailFolders", False),
+    ("/MailFolders/folder-id/childFolders", False),
+    ("/messages/message-id", False),
+    ("/messages('message-id')", False),
+    ("/MailFolders/folder-id/messages", True),
+    ("/MailFolders/folder-id/messages/", True),
+    (BASE_URL + "/MailFolders/folder-id/messages?$skiptoken=fixture-cursor", True),
+])
+def test_rest_adapter_applies_tracking_only_to_message_collections(monkeypatch, path, tracking):
+    captured = []
+
+    def response(client, method, requested_path, **kwargs):
+        captured.append((method, requested_path, kwargs))
+        return httpx.Response(200, json={"value": []}, headers={"Preference-Applied": "odata.track-changes"} if tracking else {})
+
+    monkeypatch.setattr(mail_sync, "request_response", response)
+    client = SimpleNamespace(_client=object(), _refresh=None, account_name="default")
+    reader = RestReader(client, interval=0, page_size=50)
+    result = reader.get(path, params={"$top": 50})
+
+    method, requested_path, kwargs = captured[0]
+    assert method == "GET"
+    assert requested_path == path
+    prefer = kwargs["headers"]["Prefer"]
+    assert ("odata.track-changes" in prefer) is tracking
+    assert 'outlook.body-content-type="text"' in prefer
+    assert "odata.maxpagesize=50" in prefer
+    assert result["_tracking"] is tracking
+    assert reader.requests == 1
+    assert reader.response_bytes > 0
+
+
+def test_rest_adapter_rejects_foreign_cursor_before_using_http_client(monkeypatch):
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("Foreign origin must be rejected before HTTP")
+
+    monkeypatch.setattr(mail_sync, "request_response", forbidden)
+    client = SimpleNamespace(_client=object(), _refresh=None, account_name="default")
+    with pytest.raises(OutlookCliError, match="outside the API origin"):
+        RestReader(client, interval=0).get("https://foreign.invalid/collect?opaque=cursor")
+
+
+def test_rest_record_handles_null_draft_sender_recipients_and_body():
+    record = rest_record({"Id": "null-draft", "Subject": "Draft", "From": None, "Body": None,
+                          "ToRecipients": None, "CcRecipients": None, "Categories": None})
+    assert record["id"] == "null-draft"
+    assert record["body"] == ""
+    assert record["to"] == []
+
+
+def test_rest_initial_tracking_does_not_cap_whole_folder_with_top():
+    reader = RestReader(None, interval=0, page_size=50)
+    path, params = reader.initial("folder/encoded")
+    assert path == "/MailFolders/folder%2Fencoded/messages"
+    assert "$top" not in params
+    assert "Body" in params["$select"]
+    assert params["$expand"].startswith("Attachments(")
+
+
+def test_initial_draft_without_sender_does_not_trigger_unnecessary_hydration():
+    store = FakeStore()
+    seed, final = link("seed"), link("final")
+    draft = message("draft")
+    draft.pop("From")
+    reader = FakeReader({initial_path(): [{"value": [draft], "_tracking": True, "@odata.deltaLink": seed}],
+                         seed: [{"value": [], "@odata.deltaLink": final}]})
+    sync_folder(store, reader, FOLDER)
+    assert reader.hydrate_calls == []
+    assert store.active[("rest", FOLDER["id"])]["draft"]["body"] == "Gövde"
+
+
+def test_initial_missing_body_hydrates_before_committing_page():
+    store = FakeStore()
+    seed, final = link("seed"), link("final")
+    sparse = message("a")
+    sparse.pop("Body")
+    reader = FakeReader({initial_path(): [{"value": [sparse], "_tracking": True, "@odata.deltaLink": seed}],
+                         seed: [{"value": [], "@odata.deltaLink": final}]}, hydrated={"a": message("a")})
+    sync_folder(store, reader, FOLDER)
+    assert reader.hydrate_calls == ["a"]
+    assert store.commits[0]["records"][0]["body"] == "Gövde"

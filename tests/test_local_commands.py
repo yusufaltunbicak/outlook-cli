@@ -107,11 +107,12 @@ def test_local_read_defaults_to_plain_text_and_never_changes_read_state(runner, 
     assert "<html>" in html["body"]
 
 
-def test_thread_crosses_folders_and_reports_limit(runner, mailbox_store):
-    payload = parsed(runner.invoke(cli, ["local", "thread", "message-a", "--limit", "1", "--json"]))
+@pytest.mark.parametrize("identity", ["message-a", "thread-a"])
+def test_thread_crosses_folders_and_reports_limit(runner, mailbox_store, identity):
+    payload = parsed(runner.invoke(cli, ["local", "thread", identity, "--limit", "1", "--json"]))
     assert payload["meta"]["has_more"] is True
     assert payload["meta"]["result_complete"] is False
-    payload = parsed(runner.invoke(cli, ["local", "thread", "message-a", "--json"]))
+    payload = parsed(runner.invoke(cli, ["local", "thread", identity, "--json"]))
     assert [row["id"] for row in payload["data"]] == ["message-a", "message-b"]
     assert payload["meta"]["result_complete"] is True
 
