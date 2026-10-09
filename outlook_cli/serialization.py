@@ -7,8 +7,6 @@ from pathlib import Path
 
 import click
 
-from .models import Attachment, Contact, Email, Event, Folder
-
 SCHEMA_VERSION = "1"
 
 

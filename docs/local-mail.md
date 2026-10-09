@@ -55,6 +55,9 @@ short snippets and `[[...]]` highlights without full bodies. Trim with
 `--fields id,subject,snippet,highlighted`. Fetch a full message/thread only for
 relevant results. Thread order is chronological; metadata reports truncation and
 stored-scope completeness. Defaults of existing commands remain unchanged.
+`--view compact` preserves local snippets and highlights. Turkish apostrophes
+within words, such as `İstanbul'da`, are accepted. Attachment-list metadata
+reports `metadata_complete`; legacy imports remain unverified until a full sync.
 
 ## Resume, API limits and coverage
 
