@@ -9,7 +9,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import asdict
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -83,9 +83,12 @@ class RestReader:
         if remaining > 0:
             time.sleep(remaining)
         self.last_request = time.monotonic()
+        prefer = f'odata.maxpagesize={self.page_size}, outlook.body-content-type="text"'
+        if urlsplit(path).path.rstrip("/").lower().endswith("/messages"):
+            prefer = "odata.track-changes, " + prefer
         response = request_response(
             self.client._client, "GET", path, params=params,
-            headers={"Prefer": f'odata.track-changes, odata.maxpagesize={self.page_size}, outlook.body-content-type="text"'},
+            headers={"Prefer": prefer},
             refresh=self.client._refresh_token if self.client._refresh else None,
             account_name=self.client.account_name,
         )
@@ -97,7 +100,9 @@ class RestReader:
 
     def initial(self, folder_id):
         return f"/MailFolders/{quote(folder_id, safe='')}/messages", {
-            "$select": self.fields, "$top": self.page_size,
+            # $top caps the entire legacy tracked collection, not just a page.
+            # Prefer odata.maxpagesize is the only page-size control here.
+            "$select": self.fields,
             "$expand": f"Attachments($select={ATTACHMENT_FIELDS})",
         }
 
@@ -157,7 +162,7 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
     """Commit one page at a time and resume an interrupted initial/delta round."""
     backend = reader.backend
     identity, name = folder["id"], folder["displayName"]
-    signature = f"text+attachments:v1:{backend}:{reader.page_size}"
+    signature = f"text+attachments:v2:{backend}:{reader.page_size}"
     previous = store.folder_state(backend, identity)
     pending = bool(previous.get("pending_url")) and previous.get("options_signature") == signature
     rebuild = full or (bool(previous.get("pending_full")) if pending else not previous.get("cursor")) or previous.get("options_signature") != signature
@@ -234,7 +239,7 @@ def sync_folder(store, reader, folder, *, full=False, max_pages=10000, on_page=N
             if not msg_id:
                 raise OutlookCliError("Sync message has no identity; checkpoint retained.")
             # Delta ordering is not authoritative. Resolve each change against current state.
-            required = {"Id", "Subject", "Body", "From", "ToRecipients", "ParentFolderId"} if backend == "rest" else {"id", "subject", "body", "from", "toRecipients", "parentFolderId"}
+            required = {"Id", "Subject", "Body", "ToRecipients", "ParentFolderId"} if backend == "rest" else {"id", "subject", "body", "toRecipients", "parentFolderId"}
             if not hydrated and (not rebuild or not required.issubset(message) or msg_id in identities or backend == "graph"):
                 try:
                     message = reader.hydrate(msg_id)

@@ -99,7 +99,17 @@ def sync(backend, folders, full, page_size, interval, max_pages, as_json, accoun
                 reader = GraphSyncReader(graph, interval=interval, page_size=page_size)
             else:
                 reader = RestReader(_get_client(profile), interval=interval, page_size=page_size)
-            available = discover_folders(reader)
+            try:
+                available = discover_folders(reader)
+            except RateLimitError as exc:
+                store.set_cooldown(exc.retry_after or 60)
+                raise
+            except httpx.HTTPStatusError as exc:
+                raise httpx.HTTPStatusError(
+                    f"Folder discovery failed (HTTP {exc.response.status_code}); no folder was reconciled.",
+                    request=exc.request, response=exc.response) from None
+            except httpx.RequestError as exc:
+                raise httpx.RequestError("Folder discovery connection failed; no folder was reconciled.", request=exc.request) from None
             selected = []
             for requested in folders:
                 matches = [f for f in available if requested == f["id"] or requested.casefold() == f["displayName"].casefold()]
