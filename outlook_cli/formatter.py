@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timezone, tzinfo
 
 from rich import box
 from rich.console import Console
@@ -165,7 +165,8 @@ def print_attachments(attachments: list[Attachment]) -> None:
     console.print(table)
 
 
-def print_events(events: list[Event]) -> None:
+def print_events(events: list[Event], tz: tzinfo | None = None) -> None:
+    """Render events, converting their datetimes to ``tz`` when supplied."""
     table = _table(pad_edge=True)
     table.add_column("#", style="dim", width=5, justify="right")
     table.add_column("Date", width=12)
@@ -176,10 +177,12 @@ def print_events(events: list[Event]) -> None:
     table.add_column("Ppl", width=4, justify="right")
 
     for ev in events:
+        start = ev.start.astimezone(tz) if tz else ev.start
+        end = ev.end.astimezone(tz) if tz else ev.end
         table.add_row(
             str(ev.display_num) if ev.display_num else "",
-            ev.start.strftime("%Y-%m-%d"),
-            _event_time_text(ev),
+            start.strftime("%Y-%m-%d"),
+            _event_time_text(ev, start, end),
             _response_icon(ev.response_status),
             _truncate(ev.subject, 45),
             _truncate(ev.location, 20),
@@ -189,13 +192,16 @@ def print_events(events: list[Event]) -> None:
     console.print(table)
 
 
-def print_event_detail(event: Event) -> None:
+def print_event_detail(event: Event, tz: tzinfo | None = None) -> None:
+    """Render an event detail view in ``tz`` when supplied."""
+    start = event.start.astimezone(tz) if tz else event.start
+    end = event.end.astimezone(tz) if tz else event.end
     header = f"[bold]Subject:[/bold] {event.subject}\n"
     if event.is_all_day:
-        header += f"[bold]When:[/bold] {event.start.strftime('%Y-%m-%d')} (All day)\n"
+        header += f"[bold]When:[/bold] {start.strftime('%Y-%m-%d')} (All day)\n"
     else:
-        header += f"[bold]Start:[/bold] {event.start.strftime('%Y-%m-%d %H:%M')}\n"
-        header += f"[bold]End:[/bold] {event.end.strftime('%Y-%m-%d %H:%M')}\n"
+        header += f"[bold]Start:[/bold] {start.strftime('%Y-%m-%d %H:%M')}\n"
+        header += f"[bold]End:[/bold] {end.strftime('%Y-%m-%d %H:%M')}\n"
     if event.location:
         header += f"[bold]Location:[/bold] {event.location}\n"
     header += f"[bold]Organizer:[/bold] {event.organizer}\n"
@@ -433,10 +439,12 @@ def _flag_text(email: Email) -> Text:
     return flags
 
 
-def _event_time_text(event: Event) -> Text:
+def _event_time_text(event: Event, start: datetime | None = None, end: datetime | None = None) -> Text:
     if event.is_all_day:
         return Text("All Day", style="dim")
-    return Text(f"{event.start.strftime('%H:%M')}-{event.end.strftime('%H:%M')}", style="cyan")
+    start = start or event.start
+    end = end or event.end
+    return Text(f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}", style="cyan")
 
 
 def _response_icon(response_status: str) -> Text:
