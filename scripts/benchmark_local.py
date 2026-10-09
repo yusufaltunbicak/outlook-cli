@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -334,6 +335,8 @@ def main():
     # Keep those owner-only along with the private benchmark snapshots.
     os.umask(0o077)
     result = {"offline": True, "query_suite": "turkish_business_v1", "query_count": len(QUERIES),
+              "environment": {"python": platform.python_version(), "sqlite": sqlite3.sqlite_version,
+                              "platform": sys.platform, "architecture": platform.machine()},
               "limit": args.limit, "backend": args.backend, "new_match_mode": args.match,
               "warm_query_includes": "scope/count/ranking/selected-row decoding/snippets; excludes JSON serialization",
               "cli_includes": "fresh Python process/imports/DB open/query/JSON serialization",
