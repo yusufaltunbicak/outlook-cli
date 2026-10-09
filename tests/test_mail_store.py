@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import unicodedata
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,30 @@ def test_turkish_fold_is_case_and_ascii_insensitive():
     assert fold("Iıİi Şş Ğğ Üü Öö Çç") == "iiii ss gg uu oo cc"
     assert fold("İŞLEM") == "islem"
     assert fold("go\u0308ru\u0308s\u0327me") == "gorusme"
+
+
+def test_optimized_fold_preserves_unicode_normalization():
+    text = "".join(chr(codepoint) for start, stop in ((0, 0x250), (0x300, 0x370), (0x590, 0x650), (0x1F00, 0x2000), (0xFB00, 0xFB10)) for codepoint in range(start, stop))
+    text += "👩🏽‍💻\U0001d185\u034f"
+    decomposed = unicodedata.normalize("NFKD", text.casefold().replace("ı", "i"))
+    reference = "".join(char for char in decomposed if not unicodedata.combining(char))
+    assert fold(text) == reference
+
+
+@pytest.mark.parametrize("body,query,mode,expected", [
+    ("reorganization before organization", "org", "prefix", "[[organization]]"),
+    ("organization before organ", "organ", "exact", "[[organ]]"),
+    ("Straße görüşmesi", "strass", "prefix", "[[Straße]]"),
+    ("Cafe\u0301 go\u0308ru\u0308s\u0327me", "cafe", "exact", "[[Cafe\u0301]]"),
+    ("Straße Cafe\u0301 göru\u0308s\u0327me", "gorusme", "prefix", "[[göru\u0308s\u0327me]]"),
+])
+def test_snippet_highlights_original_word_boundaries_and_unicode(store, body, query, mode, expected):
+    populate(store, [message(body=body, subject="", preview="")])
+    rows, _ = store.query(query, match_mode=mode)
+    assert rows
+    assert expected in rows[0]["highlighted"]
+    assert "[[reorganization]]" not in rows[0]["highlighted"]
+    assert len(rows[0]["snippet"]) <= 242
 
 
 @pytest.mark.parametrize("query", ["toplantı", "TOPLANTI", "toplan", "sirket", "ŞİRKET", "odeme", "gorus"])

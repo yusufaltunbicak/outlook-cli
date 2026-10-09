@@ -29,6 +29,19 @@ _QUERY_FIELDS = {"from", "to", "person", "domain", "folder", "after", "before", 
 _SUFFIXES = tuple(sorted(("larindan", "lerinden", "larinin", "lerinin", "lardan", "lerden", "larina", "lerine", "larin", "lerin", "lari", "leri", "nin", "nun", "dan", "den", "lar", "ler", "nda", "nde", "yla", "yle", "da", "de"), key=len, reverse=True))
 
 
+class _CombiningMap(dict):
+    """Cache Unicode character properties, never bodies or other user data."""
+
+    def __missing__(self, codepoint):
+        result = None if unicodedata.combining(chr(codepoint)) else codepoint
+        if len(self) < 4096:
+            self[codepoint] = result
+        return result
+
+
+_COMBINING_MAP = _CombiningMap()
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -36,7 +49,7 @@ def _now() -> str:
 def fold(text: str) -> str:
     """Turkish-safe accent/case folding; stored display text is untouched."""
     decomposed = unicodedata.normalize("NFKD", str(text).casefold().replace("ı", "i"))
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
+    return decomposed.translate(_COMBINING_MAP)
 
 
 def _stem(word: str) -> str:
@@ -110,7 +123,7 @@ def _terms(query: str) -> tuple[list[tuple[str, bool]], dict]:
     return terms, fields
 
 
-def _fts_query(terms: list[tuple[str, bool]], mode: str) -> tuple[str, list[str]]:
+def _fts_query(terms: list[tuple[str, bool]], mode: str) -> tuple[str, list[tuple[str, bool]]]:
     if mode not in ("exact", "prefix", "stem"):
         raise ValueError("match_mode must be exact, prefix or stem")
     clauses, highlights = [], []
@@ -123,35 +136,67 @@ def _fts_query(terms: list[tuple[str, bool]], mode: str) -> tuple[str, list[str]
             continue
         if phrase:
             clauses.append('"' + " ".join(words) + '"')
-            highlights.append(term)
+            highlights.append((term, False))
         else:
             for word in words:
                 expanded = _stem(word) if mode == "stem" else word
                 clauses.append('"' + expanded + '"' + ("*" if mode != "exact" else ""))
-                highlights.append(expanded)
+                highlights.append((expanded, mode != "exact"))
     return " AND ".join(clauses), highlights
 
 
-def _snippet(text: str, terms: list[str], max_chars: int = 240) -> tuple[str, str]:
-    """Bounded snippets highlight original spelling with plain [[...]] markers."""
-    text = re.sub(r"\s+", " ", text).strip()
-    folded_text = fold(text)
-    # Turkish case/diacritic folding preserves codepoint positions. Only build
-    # the slower mapping for decomposed accents or expanding Unicode letters.
-    offsets = None
-    if len(folded_text) != len(text):
-        offsets = [index for index, char in enumerate(text) for _ in fold(char)]
+def _match_spans(folded_text: str, terms: list[tuple[str, bool]]) -> list[tuple[int, int]]:
+    """Match word boundaries like FTS, rather than substrings inside a word."""
     matches = []
-    for term in terms:
+    for term, prefix in terms:
         if not term:
             continue
         start = folded_text.find(term)
-        if start >= 0:
+        while start >= 0:
             stop = start + len(term)
-            # Prefix/stem matching highlights the complete word.
-            while stop < len(folded_text) and folded_text[stop].isalnum():
-                stop += 1
-            matches.append((offsets[start], offsets[stop - 1] + 1) if offsets is not None else (start, stop))
+            if (start == 0 or not folded_text[start - 1].isalnum()) and (prefix or stop == len(folded_text) or not folded_text[stop].isalnum()):
+                # Prefix/stem matching highlights the complete word.
+                if prefix:
+                    while stop < len(folded_text) and folded_text[stop].isalnum():
+                        stop += 1
+                matches.append((start, stop))
+                break
+            start = folded_text.find(term, start + 1)
+    return matches
+
+
+def _original_spans(text: str, spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Map only the needed prefix, preserving expansions and combining marks."""
+    if not spans or text.isascii():
+        return spans
+    wanted = {position for start, stop in spans for position in (start, stop - 1)}
+    maximum = max(wanted)
+    offsets, normalized_position = {}, 0
+    for index, char in enumerate(text):
+        length = 1 if ord(char) < 128 else len(fold(char))
+        for position in range(normalized_position, normalized_position + length):
+            if position in wanted:
+                offsets[position] = index
+        normalized_position += length
+        if normalized_position > maximum:
+            break
+    mapped = []
+    for start, stop in spans:
+        end = offsets[stop - 1] + 1
+        # Keep trailing decomposed accents inside the original highlighted word.
+        while end < len(text) and ord(text[end]) >= 128 and not fold(text[end]):
+            end += 1
+        mapped.append((offsets[start], end))
+    return mapped
+
+
+def _snippet(text: str, terms: list[tuple[str, bool]], max_chars: int = 240, *,
+             folded_text: str | None = None) -> tuple[str, str]:
+    """Bounded snippets highlight original spelling with plain [[...]] markers."""
+    if folded_text is None:
+        text = re.sub(r"\s+", " ", text).strip()
+        folded_text = fold(text)
+    matches = _original_spans(text, _match_spans(folded_text, terms))
     focus = min((start for start, _ in matches), default=0)
     start = max(0, focus - max_chars // 3)
     stop = min(len(text), start + max_chars)
@@ -477,13 +522,17 @@ class MailStore:
             for row in rows:
                 record = _unpack(row["metadata"])
                 plain = self._body(row["body_hash"]) or record.get("preview", "")
-                source = plain
-                if highlights and not all(term in fold(plain) for term in highlights):
+                source = re.sub(r"\s+", " ", plain).strip()
+                normalized_source = fold(source) if highlights else ""
+                if highlights and len(_match_spans(normalized_source, highlights)) < len(highlights):
                     people = [record.get("sender") or {}] + record.get("to", []) + record.get("cc", [])
-                    source = " ".join([record.get("subject", ""),
+                    heading = " ".join([record.get("subject", ""),
                                        " ".join(person.get("name", "") + " " + person.get("address", "") for person in people),
-                                       " ".join(item.get("name", "") for item in record.get("attachments", [])), plain])
-                snippet, highlighted = _snippet(source, highlights, snippet_chars)
+                                       " ".join(item.get("name", "") for item in record.get("attachments", []))])
+                    heading = re.sub(r"\s+", " ", heading).strip()
+                    source = heading + " " + source
+                    normalized_source = fold(heading) + " " + normalized_source
+                snippet, highlighted = _snippet(source, highlights, snippet_chars, folded_text=normalized_source)
                 data.append({key: record.get(key) for key in ("id", "subject", "sender", "to", "cc", "received", "conversation_id", "is_read", "categories")})
                 data[-1].update(backend=backend, folder_id=row["folder_id"], folder_name=row["folder_name"], has_attachments=bool(row["has_attachments"]), snippet=snippet, highlighted=highlighted, score=row["score"], attachment_count=len(record.get("attachments", [])))
             meta.update(total_matches=total, returned_count=len(data), offset=offset, has_more=total > offset + len(data),
