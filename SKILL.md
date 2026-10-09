@@ -75,8 +75,8 @@ outlook local attachments MESSAGE_ID --json
 These reads are offline and never mark mail read: no auth/keychain or network.
 Carry real IDs and backend; REST/Graph IDs have different namespaces. Search is
 already compact with bounded snippets, BM25 score and `highlighted` using `[[...]]`.
-Use `--fields id,subject,snippet,highlighted` to trim further. Avoid `--view compact`
-on local snippets because the legacy compact projection removes those fields.
+Use `--fields id,subject,snippet,highlighted` to trim further. `--view compact`
+preserves local snippets, highlights and folder context.
 Fetch full messages/threads only when a result is relevant.
 
 Literal words are ANDed; quotes mean exact phrases. Fields are `from:`, `to:`,
@@ -90,6 +90,8 @@ Check `whole_mailbox_complete`, `complete`, `oldest_sync`, `has_more` and
 `result_complete`: coverage is as of sync, not current remote freshness. No
 automatic refresh occurs; a separate online archive and attachment bytes are
 outside the default copy. A local thread can be partial when folders are missing.
+Check `local attachments` metadata `metadata_complete`; an empty list from a
+legacy import cannot certify absence of attachments until a full sync verifies it.
 
 ```bash
 outlook local import-index --no-input --json  # optional; source retained
